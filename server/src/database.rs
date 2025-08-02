@@ -161,46 +161,73 @@ pub async fn cleanup_old_tables(pool: &PgPool) -> Result<()> {
 }
 
 pub async fn insert_sample_data(pool: &PgPool) -> Result<()> {
-    // Check if we already have data
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM villages")
-        .fetch_one(pool)
-        .await?;
+    // First, create a sample server if none exists
+    let servers = get_all_servers(pool).await?;
+    let server_id = if servers.is_empty() {
+        let server = add_server(pool, "Sample Server", "https://sample.travian.com").await?;
+        set_active_server(pool, server.id).await?;
+        server.id
+    } else {
+        servers[0].id
+    };
 
-    if count > 0 {
+    // Check if we already have data for this server
+    let available_dates = get_available_dates_for_server(pool, server_id).await?;
+    if !available_dates.is_empty() {
         return Ok(()); // Data already exists
     }
 
-    // Insert sample villages
+    // Create table for today
+    let today = chrono::Utc::now().date_naive();
+    let table_name = create_table_for_server_and_date(pool, server_id, today).await?;
+
+    // Insert sample villages with tribe information
     let villages = vec![
-        ("Capital Village", 0, 0, 1000),
-        ("North Settlement", 5, 10, 500),
-        ("East Outpost", 15, 3, 300),
-        ("South Trading Post", -8, -12, 750),
-        ("Western Fort", -20, 5, 600),
-        ("Mountain Village", 25, 25, 800),
-        ("River Crossing", -15, 8, 450),
-        ("Forest Camp", 12, -5, 350),
-        ("Desert Oasis", 30, -20, 200),
-        ("Coastal Town", -25, -15, 900),
-        ("Hill Fort", 8, 18, 650),
-        ("Valley Farm", -5, -8, 400),
+        ("Capitol", 0, 0, 1000, 1, "Caesar", "Romans United"), // Romans
+        ("Fortress Germania", 5, 10, 850, 2, "Arminius", "Teutonic Knights"), // Teutons
+        ("Village Gaulois", 15, 3, 750, 3, "Vercingetorix", "Gaul Alliance"), // Gauls
+        ("Roman Outpost", -8, -12, 900, 1, "Marcus", "Romans United"), // Romans
+        ("Teutonic Fort", -20, 5, 800, 2, "Wolfgang", "Teutonic Knights"), // Teutons
+        ("Celtic Hill", 25, 25, 700, 3, "Asterix", "Gaul Alliance"), // Gauls
+        ("Imperial City", -15, 8, 1200, 1, "Augustus", "Roman Empire"), // Romans
+        ("Barbarian Camp", 12, -5, 650, 2, "Thorsten", "Wild Boars"), // Teutons
+        ("Druid Grove", 30, -20, 600, 3, "Panoramix", "Forest Guardians"), // Gauls
+        ("Oasis Settlement", -25, -15, 200, 4, "Nature", ""), // Nature
+        ("Natars Village", 8, 18, 1500, 5, "Natars", ""), // Natars
+        ("Egyptian Pyramid", -5, -8, 950, 6, "Cleopatra", "Desert Sands"), // Egyptians
+        ("Hun Encampment", 40, 30, 800, 7, "Attila", "Horse Lords"), // Huns
+        ("Roman Villa", 45, -25, 750, 1, "Cicero", "Roman Senate"), // Romans
+        ("Germanic Village", -30, 20, 700, 2, "Hermann", "Forest Tribes"), // Teutons
+        ("Gaulish Trade Post", 35, 15, 650, 3, "Obelix", "Menhir Traders"), // Gauls
     ];
 
-    for (name, x, y, population) in villages {
-        sqlx::query(
-            "INSERT INTO villages (village, x, y, population, player, alliance) VALUES ($1, $2, $3, $4, $5, $6)"
-        )
-        .bind(name)
-        .bind(x)
-        .bind(y)
-        .bind(population)
-        .bind("Sample Player")
-        .bind("Sample Alliance")
-        .execute(pool)
-        .await?;
+    for (i, (name, x, y, population, tribe_id, player, alliance)) in villages.iter().enumerate() {
+        let query = format!(
+            r#"
+            INSERT INTO {} (server_id, worldid, x, y, tid, vid, village, uid, player, aid, alliance, population)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            "#,
+            table_name
+        );
+        
+        sqlx::query(&query)
+            .bind(server_id)
+            .bind(Some(1000 + i as i32)) // Sequential world ID
+            .bind(*x)
+            .bind(*y)
+            .bind(Some(*tribe_id))
+            .bind(Some(5000 + i as i32)) // Sequential village ID
+            .bind(name)
+            .bind(Some(100 + i as i32)) // Sequential user ID
+            .bind(if player.is_empty() { None } else { Some(player.to_string()) })
+            .bind(Some(1 + (i as i32 % 10))) // Alliance ID based on index
+            .bind(if alliance.is_empty() { None } else { Some(alliance.to_string()) })
+            .bind(*population)
+            .execute(pool)
+            .await?;
     }
 
-    println!("Inserted {} sample villages into database", 12);
+    println!("Inserted {} sample villages into database for server {}", villages.len(), server_id);
     Ok(())
 }
 
@@ -617,12 +644,30 @@ pub async fn add_server(pool: &PgPool, name: &str, url: &str) -> Result<Server> 
     .fetch_one(pool)
     .await?;
 
-    Ok(Server {
+    let server = Server {
         id: row.get("id"),
         name: row.get("name"),
         url: row.get("url"),
         is_active: row.get("is_active"),
-    })
+    };
+
+    // If this is the first server, make it active and auto-load data
+    let all_servers = get_all_servers(pool).await?;
+    if all_servers.len() == 1 {
+        set_active_server(pool, server.id).await?;
+        
+        // Auto-load data for the new active server
+        match auto_load_data_for_server(pool, &server).await {
+            Ok(load_message) => {
+                println!("Auto-loaded data for new server '{}': {}", server.name, load_message);
+            },
+            Err(e) => {
+                println!("Failed to auto-load data for new server '{}': {}", server.name, e);
+            }
+        }
+    }
+
+    Ok(server)
 }
 
 pub async fn set_active_server(pool: &PgPool, server_id: i32) -> Result<()> {
@@ -638,6 +683,23 @@ pub async fn set_active_server(pool: &PgPool, server_id: i32) -> Result<()> {
         .await?;
     
     Ok(())
+}
+
+pub async fn set_active_server_with_auto_load(pool: &PgPool, server_id: i32) -> Result<String> {
+    // First activate the server
+    set_active_server(pool, server_id).await?;
+    
+    // Get the server details for auto-loading
+    let servers = get_all_servers(pool).await?;
+    if let Some(server) = servers.into_iter().find(|s| s.id == server_id) {
+        // Auto-load data if needed
+        match auto_load_data_for_server(pool, &server).await {
+            Ok(load_message) => Ok(load_message),
+            Err(e) => Ok(format!("Server activated but failed to auto-load data: {}", e))
+        }
+    } else {
+        Ok("Server activated successfully".to_string())
+    }
 }
 
 pub async fn remove_server(pool: &PgPool, server_id: i32) -> Result<()> {
@@ -700,7 +762,11 @@ pub async fn auto_load_data_for_server(pool: &PgPool, server: &Server) -> Result
     }
 
     // Construct the SQL URL based on the server URL
-    let sql_url = format!("{}/map.sql", server.url.trim_end_matches('/'));
+    let sql_url = if server.url.ends_with("/map.sql") || server.url.ends_with("map.sql") {
+        server.url.clone()
+    } else {
+        format!("{}/map.sql", server.url.trim_end_matches('/'))
+    };
     
     println!("Auto-loading data for server '{}' from: {}", server.name, sql_url);
 
@@ -737,4 +803,163 @@ pub async fn get_active_server(pool: &PgPool) -> Result<Option<Server>> {
     } else {
         Ok(None)
     }
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct TribeStats {
+    pub tribe_id: i32,
+    pub tribe_name: String,
+    pub village_count: i32,
+    pub total_population: i64,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct PlayerStats {
+    pub player_name: String,
+    pub village_count: i32,
+    pub total_population: i64,
+    pub alliance: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct WorldInfo {
+    pub tribe_stats: Vec<TribeStats>,
+    pub top_players: Vec<PlayerStats>,
+    pub total_villages: i32,
+    pub total_population: i64,
+}
+
+fn get_tribe_name(tribe_id: i32) -> String {
+    match tribe_id {
+        1 => "Romans".to_string(),
+        2 => "Teutons".to_string(),
+        3 => "Gauls".to_string(),
+        4 => "Nature".to_string(),
+        5 => "Natars".to_string(),
+        6 => "Egyptians".to_string(),
+        7 => "Huns".to_string(),
+        _ => format!("Tribe {}", tribe_id),
+    }
+}
+
+pub async fn get_world_info(pool: &PgPool) -> Result<WorldInfo> {
+    // Get the active server
+    let active_server = get_active_server(pool).await?;
+    
+    if let Some(server) = active_server {
+        get_world_info_for_server(pool, server.id).await
+    } else {
+        Err(anyhow::anyhow!("No active server found"))
+    }
+}
+
+pub async fn get_world_info_for_server(pool: &PgPool, server_id: i32) -> Result<WorldInfo> {
+    // Get the latest table for this server
+    let available_dates = get_available_dates_for_server(pool, server_id).await?;
+    
+    if available_dates.is_empty() {
+        return Ok(WorldInfo {
+            tribe_stats: Vec::new(),
+            top_players: Vec::new(),
+            total_villages: 0,
+            total_population: 0,
+        });
+    }
+    
+    let latest_date = available_dates[0].0;
+    let table_name = get_table_name_for_server_and_date(server_id, latest_date);
+    
+    // Check if table exists
+    let table_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1)"
+    )
+    .bind(&table_name)
+    .fetch_one(pool)
+    .await?;
+    
+    if !table_exists {
+        return Ok(WorldInfo {
+            tribe_stats: Vec::new(),
+            top_players: Vec::new(),
+            total_villages: 0,
+            total_population: 0,
+        });
+    }
+    
+    // Get tribe statistics
+    let tribe_query = format!(
+        "SELECT tid, COUNT(*) as village_count, SUM(population) as total_population 
+         FROM {} 
+         WHERE server_id = $1 AND tid IS NOT NULL 
+         GROUP BY tid 
+         ORDER BY total_population DESC",
+        table_name
+    );
+    
+    let tribe_rows = sqlx::query(&tribe_query)
+        .bind(server_id)
+        .fetch_all(pool)
+        .await?;
+    
+    let tribe_stats: Vec<TribeStats> = tribe_rows
+        .into_iter()
+        .map(|row| {
+            let tribe_id: i32 = row.get("tid");
+            TribeStats {
+                tribe_id,
+                tribe_name: get_tribe_name(tribe_id),
+                village_count: row.get::<i64, _>("village_count") as i32,
+                total_population: row.get::<Option<i64>, _>("total_population").unwrap_or(0),
+            }
+        })
+        .collect();
+    
+    // Get top 10 players by population (excluding Natars)
+    let player_query = format!(
+        "SELECT player, alliance, COUNT(*) as village_count, SUM(population) as total_population 
+         FROM {} 
+         WHERE server_id = $1 AND player IS NOT NULL AND player != '' AND player != 'Natars'
+         GROUP BY player, alliance 
+         ORDER BY total_population DESC 
+         LIMIT 10",
+        table_name
+    );
+    
+    let player_rows = sqlx::query(&player_query)
+        .bind(server_id)
+        .fetch_all(pool)
+        .await?;
+    
+    let top_players: Vec<PlayerStats> = player_rows
+        .into_iter()
+        .map(|row| PlayerStats {
+            player_name: row.get("player"),
+            village_count: row.get::<i64, _>("village_count") as i32,
+            total_population: row.get::<Option<i64>, _>("total_population").unwrap_or(0),
+            alliance: row.get("alliance"),
+        })
+        .collect();
+    
+    // Get total statistics
+    let total_query = format!(
+        "SELECT COUNT(*) as total_villages, SUM(population) as total_population 
+         FROM {} 
+         WHERE server_id = $1",
+        table_name
+    );
+    
+    let total_row = sqlx::query(&total_query)
+        .bind(server_id)
+        .fetch_one(pool)
+        .await?;
+    
+    let total_villages = total_row.get::<i64, _>("total_villages") as i32;
+    let total_population = total_row.get::<Option<i64>, _>("total_population").unwrap_or(0);
+    
+    Ok(WorldInfo {
+        tribe_stats,
+        top_players,
+        total_villages,
+        total_population,
+    })
 }

@@ -78,6 +78,7 @@ async fn main() -> Result<()> {
         .route("/api/servers", get(get_servers).post(add_server_api))
         .route("/api/servers/:id/activate", put(activate_server_api))
         .route("/api/servers/:id", delete(remove_server_api))
+        .route("/api/world-info", get(get_world_info))
         .layer(CorsLayer::permissive())
         .with_state(pool);
 
@@ -206,45 +207,15 @@ async fn activate_server_api(
     State(pool): State<PgPool>,
     Path(server_id): Path<i32>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    // First activate the server
-    match database::set_active_server(&pool, server_id).await {
-        Ok(_) => {
-            // Get the activated server details
-            let server = match database::get_all_servers(&pool).await {
-                Ok(servers) => servers.into_iter().find(|s| s.id == server_id),
-                Err(e) => {
-                    eprintln!("Failed to get server details: {}", e);
-                    return Err(StatusCode::INTERNAL_SERVER_ERROR);
-                }
-            };
-
-            if let Some(server) = server {
-                // Check if new data needs to be loaded and load it automatically
-                match database::auto_load_data_for_server(&pool, &server).await {
-                    Ok(load_message) => {
-                        println!("Auto-load result for server '{}': {}", server.name, load_message);
-                        Ok(Json(serde_json::json!({
-                            "status": "success",
-                            "message": "Server activated successfully",
-                            "auto_load_message": load_message
-                        })))
-                    },
-                    Err(e) => {
-                        eprintln!("Failed to auto-load data for server '{}': {}", server.name, e);
-                        // Still return success for server activation, but include the error
-                        Ok(Json(serde_json::json!({
-                            "status": "success",
-                            "message": "Server activated successfully",
-                            "auto_load_message": format!("Failed to auto-load data: {}", e)
-                        })))
-                    }
-                }
-            } else {
-                Ok(Json(serde_json::json!({
-                    "status": "success",
-                    "message": "Server activated successfully"
-                })))
-            }
+    // Activate the server and auto-load data
+    match database::set_active_server_with_auto_load(&pool, server_id).await {
+        Ok(load_message) => {
+            println!("Server activation result: {}", load_message);
+            Ok(Json(serde_json::json!({
+                "status": "success",
+                "message": "Server activated successfully",
+                "auto_load_message": load_message
+            })))
         },
         Err(e) => {
             eprintln!("Failed to activate server: {}", e);
@@ -264,6 +235,19 @@ async fn remove_server_api(
         }))),
         Err(e) => {
             eprintln!("Failed to remove server: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+async fn get_world_info(State(pool): State<PgPool>) -> Result<Json<serde_json::Value>, StatusCode> {
+    match database::get_world_info(&pool).await {
+        Ok(world_info) => Ok(Json(serde_json::json!({
+            "status": "success",
+            "data": world_info
+        }))),
+        Err(e) => {
+            eprintln!("Failed to get world info: {}", e);
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }

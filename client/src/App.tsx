@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import './App.css'
+import { WorldInfoModal } from './WorldInfo'
 
 interface Village {
   id: number;
@@ -24,6 +25,27 @@ interface Server {
   is_active: boolean;
 }
 
+interface TribeStats {
+  tribe_id: number;
+  tribe_name: string;
+  village_count: number;
+  total_population: number;
+}
+
+interface PlayerStats {
+  player_name: string;
+  village_count: number;
+  total_population: number;
+  alliance?: string;
+}
+
+interface WorldInfo {
+  tribe_stats: TribeStats[];
+  top_players: PlayerStats[];
+  total_villages: number;
+  total_population: number;
+}
+
 function App() {
   const [villages, setVillages] = useState<Village[]>([]);
   const [serverStatus, setServerStatus] = useState<HealthResponse | null>(null);
@@ -36,6 +58,9 @@ function App() {
   const [newServerUrl, setNewServerUrl] = useState<string>('');
   const [showAddServer, setShowAddServer] = useState(false);
   const [notification, setNotification] = useState<string>('');
+  const [showWorldInfo, setShowWorldInfo] = useState(false);
+  const [worldInfo, setWorldInfo] = useState<WorldInfo | null>(null);
+  const [loadingWorldInfo, setLoadingWorldInfo] = useState(false);
   
   const serverUrl = 'http://127.0.0.1:3001'; // Fixed server URL
 
@@ -168,11 +193,7 @@ function App() {
     }
   };
 
-  const removeServer = async (serverId: number, serverName: string) => {
-    if (!confirm(`Are you sure you want to remove server "${serverName}"? This will delete all associated data and cannot be undone.`)) {
-      return;
-    }
-
+    const removeServer = async (serverId: number, serverName: string) => {
     try {
       const response = await fetch(`${serverUrl}/api/servers/${serverId}`, {
         method: 'DELETE',
@@ -191,6 +212,32 @@ function App() {
     } catch (err) {
       setError('Failed to remove server');
       console.error('Remove server error:', err);
+    }
+  };
+
+  const fetchWorldInfo = async () => {
+    if (!currentServer) {
+      setError('No active server selected');
+      return;
+    }
+
+    try {
+      setLoadingWorldInfo(true);
+      const response = await fetch(`${serverUrl}/api/world-info`);
+      
+      if (response.ok) {
+        const data = await response.json();
+        setWorldInfo(data.data);
+        setShowWorldInfo(true);
+        setError('');
+      } else {
+        setError('Failed to fetch world info');
+      }
+    } catch (err) {
+      setError('Failed to fetch world info');
+      console.error('World info fetch error:', err);
+    } finally {
+      setLoadingWorldInfo(false);
     }
   };
 
@@ -242,6 +289,18 @@ function App() {
               ))}
             </select>
           </div>
+
+          {currentServer && (
+            <div className="world-info-section">
+              <button 
+                onClick={fetchWorldInfo}
+                disabled={loadingWorldInfo}
+                className="world-info-btn"
+              >
+                {loadingWorldInfo ? '🔄 Loading...' : '📊 World Info'}
+              </button>
+            </div>
+          )}
           
           <div className="manage-servers-section">
             <h3>Manage Servers:</h3>
@@ -346,6 +405,13 @@ function App() {
           </div>
         )}
       </main>
+
+      {showWorldInfo && worldInfo && (
+        <WorldInfoModal 
+          worldInfo={worldInfo} 
+          onClose={() => setShowWorldInfo(false)} 
+        />
+      )}
     </div>
   )
 }
