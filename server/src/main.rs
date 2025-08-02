@@ -89,6 +89,8 @@ async fn main() -> Result<()> {
         .route("/api/villages", get(get_villages).post(create_village))
         .route("/api/villages/:id", put(update_village).delete(delete_village))
         .route("/api/load-sql", post(load_sql_from_url))
+        .route("/api/available-dates", get(get_available_dates_api))
+        .route("/api/villages-by-date/:date", get(get_villages_by_date_api))
         .layer(CorsLayer::permissive())
         .with_state(pool);
 
@@ -219,17 +221,8 @@ async fn load_sql_from_url(
         }
     };
 
-    // Clear existing data
-    match database::clear_all_villages(&pool).await {
-        Ok(_) => {},
-        Err(e) => {
-            eprintln!("Failed to clear existing data: {}", e);
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        }
-    }
-
-    // Parse and execute the SQL
-    match database::execute_sql(&pool, &sql_content).await {
+    // Parse and execute the SQL using date tables
+    match database::execute_sql_with_date_tables(&pool, &sql_content).await {
         Ok(count) => {
             println!("Successfully loaded {} villages from SQL", count);
             Ok(Json(serde_json::json!({
@@ -239,6 +232,56 @@ async fn load_sql_from_url(
         },
         Err(e) => {
             eprintln!("Failed to execute SQL: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+async fn get_available_dates_api(
+    State(pool): State<PgPool>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    match database::get_available_dates(&pool).await {
+        Ok(dates) => {
+            let formatted_dates: Vec<serde_json::Value> = dates
+                .into_iter()
+                .map(|(date, count)| serde_json::json!({
+                    "date": date.format("%Y-%m-%d").to_string(),
+                    "village_count": count
+                }))
+                .collect();
+            
+            Ok(Json(serde_json::json!({
+                "status": "success",
+                "dates": formatted_dates
+            })))
+        },
+        Err(e) => {
+            eprintln!("Failed to get available dates: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+async fn get_villages_by_date_api(
+    State(pool): State<PgPool>,
+    Path(date_str): Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    // Parse the date string
+    let date = match chrono::NaiveDate::parse_from_str(&date_str, "%Y-%m-%d") {
+        Ok(d) => d,
+        Err(_) => {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    };
+    
+    match database::get_villages_by_date(&pool, date).await {
+        Ok(villages) => Ok(Json(serde_json::json!({
+            "status": "success",
+            "date": date_str,
+            "villages": villages
+        }))),
+        Err(e) => {
+            eprintln!("Failed to get villages for date {}: {}", date_str, e);
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }

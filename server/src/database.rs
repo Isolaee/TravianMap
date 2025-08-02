@@ -7,11 +7,22 @@ pub async fn create_pool(database_url: &str) -> Result<PgPool> {
     Ok(pool)
 }
 
-pub async fn create_tables(pool: &PgPool) -> Result<()> {
-    // Create the villages table with Travian x_world structure
-    sqlx::query(
+fn get_table_name_for_date(date: chrono::NaiveDate) -> String {
+    format!("villages_{}", date.format("%Y_%m_%d"))
+}
+
+fn get_today_table_name() -> String {
+    let today = chrono::Utc::now().date_naive();
+    get_table_name_for_date(today)
+}
+
+pub async fn create_table_for_date(pool: &PgPool, date: chrono::NaiveDate) -> Result<String> {
+    let table_name = get_table_name_for_date(date);
+    
+    // Create the villages table with Travian x_world structure for the specific date
+    let create_query = format!(
         r#"
-        CREATE TABLE IF NOT EXISTS villages (
+        CREATE TABLE IF NOT EXISTS {} (
             id SERIAL PRIMARY KEY,
             worldid INTEGER,
             x INTEGER NOT NULL,
@@ -31,25 +42,85 @@ pub async fn create_tables(pool: &PgPool) -> Result<()> {
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         )
         "#,
+        table_name
+    );
+    
+    sqlx::query(&create_query)
+        .execute(pool)
+        .await?;
+
+    // Create indexes for the new table
+    let coord_index = format!("CREATE INDEX IF NOT EXISTS idx_{}_coordinates ON {} (x, y)", table_name, table_name);
+    sqlx::query(&coord_index).execute(pool).await?;
+
+    let pop_index = format!("CREATE INDEX IF NOT EXISTS idx_{}_population ON {} (population)", table_name, table_name);
+    sqlx::query(&pop_index).execute(pool).await?;
+
+    let world_index = format!("CREATE INDEX IF NOT EXISTS idx_{}_worldid ON {} (worldid)", table_name, table_name);
+    sqlx::query(&world_index).execute(pool).await?;
+
+    Ok(table_name)
+}
+
+pub async fn create_tables(pool: &PgPool) -> Result<()> {
+    // Create the default villages table (for backward compatibility)
+    let today = chrono::Utc::now().date_naive();
+    create_table_for_date(pool, today).await?;
+    Ok(())
+}
+
+pub async fn get_available_dates(pool: &PgPool) -> Result<Vec<(chrono::NaiveDate, i32)>> {
+    // Query for all tables that match the villages_YYYY_MM_DD pattern
+    let rows = sqlx::query(
+        r#"
+        SELECT table_name 
+        FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_name LIKE 'villages_%' 
+        AND table_name ~ '^villages_[0-9]{4}_[0-9]{2}_[0-9]{2}$'
+        ORDER BY table_name DESC
+        "#
     )
-    .execute(pool)
+    .fetch_all(pool)
     .await?;
 
-    // Create index on coordinates
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_villages_coordinates ON villages (x, y)")
-        .execute(pool)
-        .await?;
+    let mut result = Vec::new();
+    
+    for row in rows {
+        let table_name: String = row.get("table_name");
+        
+        // Extract date from table name (format: villages_YYYY_MM_DD)
+        if let Some(date_part) = table_name.strip_prefix("villages_") {
+            if let Ok(date) = chrono::NaiveDate::parse_from_str(date_part, "%Y_%m_%d") {
+                // Get village count for this table
+                let count_query = format!("SELECT COUNT(*) FROM {}", table_name);
+                let count: i64 = sqlx::query_scalar(&count_query)
+                    .fetch_one(pool)
+                    .await?;
+                
+                result.push((date, count as i32));
+            }
+        }
+    }
+    
+    Ok(result)
+}
 
-    // Create index on population
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_villages_population ON villages (population)")
-        .execute(pool)
-        .await?;
-
-    // Create index on worldid
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_villages_worldid ON villages (worldid)")
-        .execute(pool)
-        .await?;
-
+pub async fn cleanup_old_tables(pool: &PgPool) -> Result<()> {
+    let available_dates = get_available_dates(pool).await?;
+    
+    // Keep only the last 10 tables
+    if available_dates.len() > 10 {
+        let tables_to_drop = &available_dates[10..];
+        
+        for (date, _) in tables_to_drop {
+            let table_name = get_table_name_for_date(*date);
+            let drop_query = format!("DROP TABLE IF EXISTS {}", table_name);
+            sqlx::query(&drop_query).execute(pool).await?;
+            println!("Dropped old table: {}", table_name);
+        }
+    }
+    
     Ok(())
 }
 
@@ -98,7 +169,38 @@ pub async fn insert_sample_data(pool: &PgPool) -> Result<()> {
 }
 
 pub async fn get_all_villages(pool: &PgPool) -> Result<Vec<MapData>> {
-    let rows = sqlx::query("SELECT id, village, x, y, population, player, alliance, worldid FROM villages ORDER BY population DESC")
+    // Get the latest table (most recent date)
+    let available_dates = get_available_dates(pool).await?;
+    
+    if available_dates.is_empty() {
+        return Ok(Vec::new()); // No tables available
+    }
+    
+    let latest_date = available_dates[0].0;
+    get_villages_by_date(pool, latest_date).await
+}
+
+pub async fn get_villages_by_date(pool: &PgPool, date: chrono::NaiveDate) -> Result<Vec<MapData>> {
+    let table_name = get_table_name_for_date(date);
+    
+    // Check if table exists
+    let table_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1)"
+    )
+    .bind(&table_name)
+    .fetch_one(pool)
+    .await?;
+    
+    if !table_exists {
+        return Ok(Vec::new());
+    }
+    
+    let query = format!(
+        "SELECT id, village, x, y, population, player, alliance, worldid FROM {} ORDER BY population DESC",
+        table_name
+    );
+    
+    let rows = sqlx::query(&query)
         .fetch_all(pool)
         .await?;
 
@@ -120,19 +222,32 @@ pub async fn get_all_villages(pool: &PgPool) -> Result<Vec<MapData>> {
 }
 
 pub async fn get_villages_near(pool: &PgPool, x: i32, y: i32, radius: i32) -> Result<Vec<MapData>> {
-    let rows = sqlx::query(
+    // Get the latest table (most recent date)
+    let available_dates = get_available_dates(pool).await?;
+    
+    if available_dates.is_empty() {
+        return Ok(Vec::new()); // No tables available
+    }
+    
+    let latest_date = available_dates[0].0;
+    let table_name = get_table_name_for_date(latest_date);
+    
+    let query = format!(
         r#"
         SELECT id, village, x, y, population, player, alliance, worldid
-        FROM villages 
+        FROM {} 
         WHERE ABS(x - $1) <= $3 AND ABS(y - $2) <= $3
         ORDER BY (ABS(x - $1) + ABS(y - $2)), population DESC
-        "#
-    )
-    .bind(x)
-    .bind(y)
-    .bind(radius)
-    .fetch_all(pool)
-    .await?;
+        "#,
+        table_name
+    );
+    
+    let rows = sqlx::query(&query)
+        .bind(x)
+        .bind(y)
+        .bind(radius)
+        .fetch_all(pool)
+        .await?;
 
     let villages: Vec<MapData> = rows
         .into_iter()
@@ -215,15 +330,36 @@ pub async fn delete_village(pool: &PgPool, id: u32) -> Result<bool> {
     Ok(result.rows_affected() > 0)
 }
 
-pub async fn clear_all_villages(pool: &PgPool) -> Result<()> {
-    sqlx::query("DELETE FROM villages")
-        .execute(pool)
-        .await?;
+pub async fn clear_todays_villages(pool: &PgPool) -> Result<()> {
+    let today = chrono::Utc::now().date_naive();
+    let table_name = get_table_name_for_date(today);
+    
+    // Check if table exists
+    let table_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1)"
+    )
+    .bind(&table_name)
+    .fetch_one(pool)
+    .await?;
+    
+    if table_exists {
+        let delete_query = format!("DELETE FROM {}", table_name);
+        sqlx::query(&delete_query).execute(pool).await?;
+    }
     
     Ok(())
 }
 
-pub async fn execute_sql(pool: &PgPool, sql_content: &str) -> Result<usize> {
+pub async fn execute_sql_with_date_tables(pool: &PgPool, sql_content: &str) -> Result<usize> {
+    let today = chrono::Utc::now().date_naive();
+    
+    // Create table for today if it doesn't exist
+    let table_name = create_table_for_date(pool, today).await?;
+    
+    // Clear existing data for today
+    let delete_query = format!("DELETE FROM {}", table_name);
+    sqlx::query(&delete_query).execute(pool).await?;
+    
     // Parse the SQL content to extract INSERT statements for x_world table
     let mut village_count = 0;
     
@@ -251,7 +387,7 @@ pub async fn execute_sql(pool: &PgPool, sql_content: &str) -> Result<usize> {
                         
                         // Parse the comma-separated values
                         if let Ok(parsed_village) = parse_x_world_values(values_str) {
-                            match insert_parsed_village(pool, parsed_village).await {
+                            match insert_parsed_village_to_table(pool, parsed_village, &table_name).await {
                                 Ok(_) => village_count += 1,
                                 Err(e) => {
                                     eprintln!("Failed to insert village: {}", e);
@@ -266,6 +402,9 @@ pub async fn execute_sql(pool: &PgPool, sql_content: &str) -> Result<usize> {
             }
         }
     }
+    
+    // Cleanup old tables (keep only last 10)
+    cleanup_old_tables(pool).await?;
     
     Ok(village_count)
 }
@@ -366,26 +505,29 @@ fn parse_x_world_values(values_str: &str) -> Result<ParsedVillage> {
     })
 }
 
-async fn insert_parsed_village(pool: &PgPool, village: ParsedVillage) -> Result<()> {
-    sqlx::query(
+async fn insert_parsed_village_to_table(pool: &PgPool, village: ParsedVillage, table_name: &str) -> Result<()> {
+    let query = format!(
         r#"
-        INSERT INTO villages (worldid, x, y, tid, vid, village, uid, player, aid, alliance, population)
+        INSERT INTO {} (worldid, x, y, tid, vid, village, uid, player, aid, alliance, population)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-        "#
-    )
-    .bind(village.worldid)
-    .bind(village.x)
-    .bind(village.y)
-    .bind(village.tid)
-    .bind(village.vid)
-    .bind(village.village)
-    .bind(village.uid)
-    .bind(village.player)
-    .bind(village.aid)
-    .bind(village.alliance)
-    .bind(village.population)
-    .execute(pool)
-    .await?;
+        "#,
+        table_name
+    );
+    
+    sqlx::query(&query)
+        .bind(village.worldid)
+        .bind(village.x)
+        .bind(village.y)
+        .bind(village.tid)
+        .bind(village.vid)
+        .bind(village.village)
+        .bind(village.uid)
+        .bind(village.player)
+        .bind(village.aid)
+        .bind(village.alliance)
+        .bind(village.population)
+        .execute(pool)
+        .await?;
     
     Ok(())
 }

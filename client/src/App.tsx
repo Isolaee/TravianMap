@@ -17,6 +17,11 @@ interface HealthResponse {
   message: string;
 }
 
+interface AvailableDate {
+  date: string;
+  village_count: number;
+}
+
 function App() {
   const [villages, setVillages] = useState<Village[]>([]);
   const [serverStatus, setServerStatus] = useState<HealthResponse | null>(null);
@@ -26,6 +31,8 @@ function App() {
   const [sqlUrl, setSqlUrl] = useState<string>('');
   const [isLoadingSql, setIsLoadingSql] = useState(false);
   const [sqlMessage, setSqlMessage] = useState<string>('');
+  const [availableDates, setAvailableDates] = useState<AvailableDate[]>([]);
+  const [selectedDate, setSelectedDate] = useState<string>('latest');
   
   const serverUrl = 'http://127.0.0.1:3001'; // Fixed server URL
 
@@ -34,7 +41,7 @@ function App() {
       setIsConnecting(true);
       setError('');
       
-      Promise.all([fetchServerStatus(), fetchVillages()])
+      Promise.all([fetchServerStatus(), fetchVillages(), fetchAvailableDates()])
         .finally(() => {
           setIsConnecting(false);
         });
@@ -43,6 +50,15 @@ function App() {
     // Initial load
     fetchData();
   }, []); // No dependencies since serverUrl is now fixed
+
+  // Handle date selection changes
+  useEffect(() => {
+    if (selectedDate === 'latest') {
+      fetchVillages();
+    } else {
+      fetchVillagesByDate(selectedDate);
+    }
+  }, [selectedDate]);
 
   const fetchServerStatus = async () => {
     try {
@@ -79,6 +95,39 @@ function App() {
     } catch (err) {
       setError('Failed to fetch data');
       console.error('Fetch error:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fetchAvailableDates = async () => {
+    try {
+      const response = await fetch(`${serverUrl}/api/available-dates`);
+      if (response.ok) {
+        const data = await response.json();
+        setAvailableDates(data.dates || []);
+      } else {
+        console.error('Failed to fetch available dates');
+      }
+    } catch (err) {
+      console.error('Error fetching available dates:', err);
+    }
+  };
+
+  const fetchVillagesByDate = async (date: string) => {
+    try {
+      setLoading(true);
+      const response = await fetch(`${serverUrl}/api/villages-by-date/${date}`);
+      if (response.ok) {
+        const data = await response.json();
+        setVillages(data.villages || []);
+        setError('');
+      } else {
+        setError('Failed to fetch villages for selected date');
+      }
+    } catch (err) {
+      setError('Failed to fetch data for selected date');
+      console.error('Fetch by date error:', err);
     } finally {
       setLoading(false);
     }
@@ -126,8 +175,8 @@ function App() {
       if (response.ok) {
         const data = await response.json();
         setSqlMessage(data.message || 'SQL loaded successfully!');
-        // Refresh the villages data
-        await fetchVillages();
+        // Refresh both villages data and available dates
+        await Promise.all([fetchVillages(), fetchAvailableDates()]);
       } else {
         setSqlMessage('Failed to load SQL file');
       }
@@ -183,6 +232,23 @@ function App() {
               {sqlMessage}
             </div>
           )}
+        </div>
+
+        <div className="date-selector">
+          <label htmlFor="date-select">View Data From:</label>
+          <select
+            id="date-select"
+            value={selectedDate}
+            onChange={(e) => setSelectedDate(e.target.value)}
+            className="date-select"
+          >
+            <option value="latest">Latest Data</option>
+            {availableDates.map((dateInfo) => (
+              <option key={dateInfo.date} value={dateInfo.date}>
+                {dateInfo.date} ({dateInfo.village_count.toLocaleString()} villages)
+              </option>
+            ))}
+          </select>
         </div>
 
         <div className="controls">
