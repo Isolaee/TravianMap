@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import './App.css'
 import { WorldInfoModal } from './WorldInfo'
+import { AfkFinderModal } from './AfkFinder'
 
 interface Village {
   id: number;
@@ -37,6 +38,8 @@ interface PlayerStats {
   village_count: number;
   total_population: number;
   alliance?: string;
+  profile_link?: string;
+  alliance_link?: string;
 }
 
 interface WorldInfo {
@@ -44,6 +47,21 @@ interface WorldInfo {
   top_players: PlayerStats[];
   total_villages: number;
   total_population: number;
+}
+
+interface AfkVillage {
+  village_name: string;
+  x: number;
+  y: number;
+  population: number;
+  player_name: string;
+  alliance?: string;
+  days_without_growth: number;
+}
+
+interface AfkSearchParams {
+  quadrant: string;
+  days: number;
 }
 
 function App() {
@@ -61,6 +79,9 @@ function App() {
   const [showWorldInfo, setShowWorldInfo] = useState(false);
   const [worldInfo, setWorldInfo] = useState<WorldInfo | null>(null);
   const [loadingWorldInfo, setLoadingWorldInfo] = useState(false);
+  const [showAfkFinder, setShowAfkFinder] = useState(false);
+  const [afkVillages, setAfkVillages] = useState<AfkVillage[]>([]);
+  const [loadingAfk, setLoadingAfk] = useState(false);
   
   const serverUrl = 'http://127.0.0.1:3001'; // Fixed server URL
 
@@ -241,6 +262,37 @@ function App() {
     }
   };
 
+  const searchAfkVillages = async (params: AfkSearchParams) => {
+    if (!currentServer) {
+      setError('No active server selected');
+      return;
+    }
+
+    try {
+      setLoadingAfk(true);
+      const response = await fetch(`${serverUrl}/api/afk-villages`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(params),
+      });
+      
+      if (response.ok) {
+        const data = await response.json();
+        setAfkVillages(data.data);
+        setError('');
+      } else {
+        setError('Failed to search AFK villages');
+      }
+    } catch (err) {
+      setError('Failed to search AFK villages');
+      console.error('AFK search error:', err);
+    } finally {
+      setLoadingAfk(false);
+    }
+  };
+
   return (
     <div className="App">
       <header className="app-header">
@@ -291,7 +343,30 @@ function App() {
           </div>
 
           {currentServer && (
-            <div className="world-info-section">
+            <div className="toolbar-section">
+              <h3>🛠️ Tools:</h3>
+              <div className="toolbar-buttons">
+                <button 
+                  onClick={fetchWorldInfo}
+                  disabled={loadingWorldInfo}
+                  className="tool-btn world-info-btn"
+                >
+                  {loadingWorldInfo ? '🔄 Loading...' : '📊 World Info'}
+                </button>
+                <button 
+                  onClick={() => setShowAfkFinder(true)}
+                  disabled={loadingAfk}
+                  className="tool-btn afk-finder-btn"
+                >
+                  {loadingAfk ? '🔄 Searching...' : '🎯 Find AFKs'}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {currentServer && (
+            <div className="world-info-section" style={{ display: 'none' }}>
+              {/* Keep this for backward compatibility but hide it */}
               <button 
                 onClick={fetchWorldInfo}
                 disabled={loadingWorldInfo}
@@ -410,6 +485,15 @@ function App() {
         <WorldInfoModal 
           worldInfo={worldInfo} 
           onClose={() => setShowWorldInfo(false)} 
+        />
+      )}
+
+      {showAfkFinder && (
+        <AfkFinderModal 
+          onClose={() => setShowAfkFinder(false)}
+          onSearch={searchAfkVillages}
+          afkVillages={afkVillages}
+          loading={loadingAfk}
         />
       )}
     </div>

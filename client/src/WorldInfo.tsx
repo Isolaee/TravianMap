@@ -22,6 +22,7 @@ interface PlayerStats {
   total_population: number;
   alliance?: string;
   profile_link?: string;
+  alliance_link?: string;
 }
 
 interface WorldInfo {
@@ -148,7 +149,15 @@ export const WorldInfoModal: React.FC<WorldInfoModalProps> = ({ worldInfo, onClo
                       <p>Population: {player.total_population.toLocaleString()}</p>
                       <p>Villages: {player.village_count.toLocaleString()}</p>
                       {player.alliance && (
-                        <p className="alliance">Alliance: {player.alliance}</p>
+                        <p className="alliance">
+                          Alliance: {player.alliance_link ? (
+                            <a href={player.alliance_link} target="_blank" rel="noopener noreferrer">
+                              {player.alliance}
+                            </a>
+                          ) : (
+                            player.alliance
+                          )}
+                        </p>
                       )}
                     </div>
                   </div>

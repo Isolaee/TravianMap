@@ -820,6 +820,7 @@ pub struct PlayerStats {
     pub total_population: i64,
     pub alliance: Option<String>,
     pub profile_link: Option<String>,
+    pub alliance_link: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -828,6 +829,23 @@ pub struct WorldInfo {
     pub top_players: Vec<PlayerStats>,
     pub total_villages: i32,
     pub total_population: i64,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct AfkVillage {
+    pub village_name: String,
+    pub x: i32,
+    pub y: i32,
+    pub population: i32,
+    pub player_name: String,
+    pub alliance: Option<String>,
+    pub days_without_growth: i32,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct AfkSearchParams {
+    pub quadrant: String, // "NE", "SE", "SW", "NW"
+    pub days: i32, // 1-10
 }
 
 fn get_tribe_name(tribe_id: i32) -> String {
@@ -927,10 +945,10 @@ pub async fn get_world_info_for_server(pool: &PgPool, server_id: i32) -> Result<
     
     // Get top 10 players by population (excluding Natars)
     let player_query = format!(
-        "SELECT player, alliance, uid, COUNT(*) as village_count, SUM(population) as total_population 
+        "SELECT player, alliance, uid, aid, COUNT(*) as village_count, SUM(population) as total_population 
          FROM {} 
          WHERE server_id = $1 AND player IS NOT NULL AND player != '' AND player != 'Natars'
-         GROUP BY player, alliance, uid 
+         GROUP BY player, alliance, uid, aid 
          ORDER BY total_population DESC 
          LIMIT 10",
         table_name
@@ -945,8 +963,14 @@ pub async fn get_world_info_for_server(pool: &PgPool, server_id: i32) -> Result<
         .into_iter()
         .map(|row| {
             let uid: Option<i32> = row.get("uid");
+            let aid: Option<i32> = row.get("aid");
             let profile_link = if let (Some(base_url), Some(player_uid)) = (&server_base_url, uid) {
                 Some(format!("{}/profile/{}", base_url, player_uid))
+            } else {
+                None
+            };
+            let alliance_link = if let (Some(base_url), Some(alliance_id)) = (&server_base_url, aid) {
+                Some(format!("{}/alliance/{}", base_url, alliance_id))
             } else {
                 None
             };
@@ -957,6 +981,7 @@ pub async fn get_world_info_for_server(pool: &PgPool, server_id: i32) -> Result<
                 total_population: row.get::<Option<i64>, _>("total_population").unwrap_or(0),
                 alliance: row.get("alliance"),
                 profile_link,
+                alliance_link,
             }
         })
         .collect();
@@ -983,4 +1008,134 @@ pub async fn get_world_info_for_server(pool: &PgPool, server_id: i32) -> Result<
         total_villages,
         total_population,
     })
+}
+
+pub async fn find_afk_villages(pool: &PgPool, params: AfkSearchParams) -> Result<Vec<AfkVillage>> {
+    // Get the active server
+    let active_server = get_active_server(pool).await?;
+    
+    if let Some(server) = active_server {
+        find_afk_villages_for_server(pool, server.id, params).await
+    } else {
+        Err(anyhow::anyhow!("No active server found"))
+    }
+}
+
+pub async fn find_afk_villages_for_server(pool: &PgPool, server_id: i32, params: AfkSearchParams) -> Result<Vec<AfkVillage>> {
+    let available_dates = get_available_dates_for_server(pool, server_id).await?;
+    
+    if available_dates.len() < (params.days as usize + 1) {
+        return Ok(Vec::new()); // Not enough historical data
+    }
+    
+    let latest_date = available_dates[0].0;
+    let comparison_date = available_dates[params.days as usize].0;
+    
+    let latest_table = get_table_name_for_server_and_date(server_id, latest_date);
+    let comparison_table = get_table_name_for_server_and_date(server_id, comparison_date);
+    
+    // Check if both tables exist
+    let latest_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1)"
+    )
+    .bind(&latest_table)
+    .fetch_one(pool)
+    .await?;
+    
+    let comparison_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1)"
+    )
+    .bind(&comparison_table)
+    .fetch_one(pool)
+    .await?;
+    
+    if !latest_exists || !comparison_exists {
+        return Ok(Vec::new());
+    }
+    
+    // Determine quadrant coordinates
+    let (x_condition, y_condition) = match params.quadrant.as_str() {
+        "NE" => ("l.x >= 0", "l.y >= 0"),
+        "SE" => ("l.x >= 0", "l.y < 0"),
+        "SW" => ("l.x < 0", "l.y < 0"),
+        "NW" => ("l.x < 0", "l.y >= 0"),
+        _ => return Err(anyhow::anyhow!("Invalid quadrant: {}", params.quadrant)),
+    };
+    
+    // Find villages that haven't grown in population
+    let village_query = format!(
+        r#"
+        SELECT l.village, l.x, l.y, l.population, l.player, l.alliance, l.uid
+        FROM {} l
+        JOIN {} c ON l.x = c.x AND l.y = c.y AND l.server_id = c.server_id
+        WHERE l.server_id = $1 
+        AND c.server_id = $1
+        AND l.player IS NOT NULL 
+        AND l.player != '' 
+        AND l.player != 'Natars'
+        AND c.player = l.player
+        AND l.population <= c.population
+        AND {} AND {}
+        "#,
+        latest_table, comparison_table, x_condition, y_condition
+    );
+    
+    let village_rows = sqlx::query(&village_query)
+        .bind(server_id)
+        .fetch_all(pool)
+        .await?;
+    
+    let mut afk_villages = Vec::new();
+    
+    for row in village_rows {
+        let player_name: String = row.get("player");
+        let _uid: Option<i32> = row.get("uid");
+        
+        // Check if this player has gained population anywhere else
+        let player_growth_query = format!(
+            r#"
+            SELECT 
+                COALESCE(SUM(l.population), 0) as latest_total,
+                COALESCE(SUM(c.population), 0) as comparison_total
+            FROM {} l
+            LEFT JOIN {} c ON l.player = c.player AND l.server_id = c.server_id
+            WHERE l.server_id = $1 
+            AND l.player = $2
+            GROUP BY l.player
+            "#,
+            latest_table, comparison_table
+        );
+        
+        let growth_row = sqlx::query(&player_growth_query)
+            .bind(server_id)
+            .bind(&player_name)
+            .fetch_optional(pool)
+            .await?;
+        
+        let has_grown = if let Some(growth_row) = growth_row {
+            let latest_total: i64 = growth_row.get("latest_total");
+            let comparison_total: i64 = growth_row.get("comparison_total");
+            latest_total > comparison_total
+        } else {
+            false
+        };
+        
+        // If player hasn't grown overall, include this village in AFK list
+        if !has_grown {
+            afk_villages.push(AfkVillage {
+                village_name: row.get("village"),
+                x: row.get("x"),
+                y: row.get("y"),
+                population: row.get("population"),
+                player_name,
+                alliance: row.get("alliance"),
+                days_without_growth: params.days,
+            });
+        }
+    }
+    
+    // Sort by population descending
+    afk_villages.sort_by(|a, b| b.population.cmp(&a.population));
+    
+    Ok(afk_villages)
 }

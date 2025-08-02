@@ -79,6 +79,7 @@ async fn main() -> Result<()> {
         .route("/api/servers/:id/activate", put(activate_server_api))
         .route("/api/servers/:id", delete(remove_server_api))
         .route("/api/world-info", get(get_world_info))
+        .route("/api/afk-villages", post(find_afk_villages_api))
         .layer(CorsLayer::permissive())
         .with_state(pool);
 
@@ -248,6 +249,31 @@ async fn get_world_info(State(pool): State<PgPool>) -> Result<Json<serde_json::V
         }))),
         Err(e) => {
             eprintln!("Failed to get world info: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+async fn find_afk_villages_api(
+    State(pool): State<PgPool>,
+    Json(params): Json<database::AfkSearchParams>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    // Validate parameters
+    if !["NE", "SE", "SW", "NW"].contains(&params.quadrant.as_str()) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    
+    if params.days < 1 || params.days > 10 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    
+    match database::find_afk_villages(&pool, params).await {
+        Ok(afk_villages) => Ok(Json(serde_json::json!({
+            "status": "success",
+            "data": afk_villages
+        }))),
+        Err(e) => {
+            eprintln!("Failed to find AFK villages: {}", e);
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
