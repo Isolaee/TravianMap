@@ -1,0 +1,103 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Start Full Stack Application",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-Command",
+				"Start-Job -ScriptBlock { Set-Location 'c:\\Users\\eero\\Documents\\Rust\\TravianMap\\server'; cargo run } -Name 'RustServer'; Start-Job -ScriptBlock { Set-Location 'c:\\Users\\eero\\Documents\\Rust\\TravianMap\\client'; npm run dev } -Name 'ReactClient'; Write-Host 'Starting Rust server and React client...'; Write-Host 'Rust server: http://127.0.0.1:3001'; Write-Host 'React client: http://127.0.0.1:5173'; Get-Job"
+			],
+			"group": "build",
+			"isBackground": true,
+			"problemMatcher": []
+		},
+		{
+			"label": "Start Rust Server",
+			"type": "shell",
+			"command": "cargo",
+			"args": ["run"],
+			"options": {
+				"cwd": "${workspaceFolder}/server"
+			},
+			"group": "build",
+			"isBackground": true,
+			"problemMatcher": []
+		},
+		{
+			"label": "Start React Client",
+			"type": "shell", 
+			"command": "npm",
+			"args": ["run", "dev"],
+			"options": {
+				"cwd": "${workspaceFolder}/client"
+			},
+			"group": "build",
+			"isBackground": true,
+			"problemMatcher": []
+		},
+		{
+			"label": "Build Rust Server",
+			"type": "shell",
+			"command": "cargo",
+			"args": ["build"],
+			"options": {
+				"cwd": "${workspaceFolder}/server"
+			},
+			"group": "build",
+			"problemMatcher": ["$rustc"]
+		},
+		{
+			"label": "Build React Client",
+			"type": "shell",
+			"command": "npm",
+			"args": ["run", "build"],
+			"options": {
+				"cwd": "${workspaceFolder}/client"
+			},
+			"group": "build",
+			"problemMatcher": []
+		},
+		{
+			"label": "Install Client Dependencies",
+			"type": "shell",
+			"command": "npm",
+			"args": ["install"],
+			"options": {
+				"cwd": "${workspaceFolder}/client"
+			},
+			"group": "build"
+		},
+		{
+			"label": "Setup Database",
+			"type": "shell",
+			"command": "powershell",
+			"args": ["-File", "setup-database.ps1"],
+			"group": "build",
+			"options": {
+				"cwd": "${workspaceFolder}"
+			}
+		},
+		{
+			"label": "Start Database",
+			"type": "shell",
+			"command": "docker-compose",
+			"args": ["up", "-d"],
+			"group": "build",
+			"options": {
+				"cwd": "${workspaceFolder}"
+			}
+		},
+		{
+			"label": "Stop Database",
+			"type": "shell",
+			"command": "docker-compose",
+			"args": ["down"],
+			"group": "build",
+			"options": {
+				"cwd": "${workspaceFolder}"
+			}
+		}
+	]
+}

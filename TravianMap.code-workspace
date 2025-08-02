@@ -1,0 +1,26 @@
+{
+    "folders": [
+        {
+            "name": "Server (Rust)",
+            "path": "./server"
+        },
+        {
+            "name": "Client (React)",
+            "path": "./client"
+        }
+    ],
+    "settings": {
+        "rust-analyzer.linkedProjects": ["./server/Cargo.toml"],
+        "typescript.preferences.includePackageJsonAutoImports": "on",
+        "editor.formatOnSave": true,
+        "editor.defaultFormatter": "esbenp.prettier-vscode"
+    },
+    "extensions": {
+        "recommendations": [
+            "rust-lang.rust-analyzer",
+            "dsznajder.es7-react-js-snippets",
+            "esbenp.prettier-vscode",
+            "tamasfe.even-better-toml"
+        ]
+    }
+}
