@@ -819,6 +819,7 @@ pub struct PlayerStats {
     pub village_count: i32,
     pub total_population: i64,
     pub alliance: Option<String>,
+    pub profile_link: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -886,6 +887,16 @@ pub async fn get_world_info_for_server(pool: &PgPool, server_id: i32) -> Result<
         });
     }
     
+    // Get the active server for profile links
+    let active_server = get_active_server(pool).await?;
+    let server_base_url = if let Some(server) = &active_server {
+        // Remove /map.sql from the end if present and prepare base URL for profile links
+        let base_url = server.url.trim_end_matches("/map.sql").trim_end_matches("map.sql");
+        Some(base_url.trim_end_matches('/').to_string())
+    } else {
+        None
+    };
+    
     // Get tribe statistics
     let tribe_query = format!(
         "SELECT tid, COUNT(*) as village_count, SUM(population) as total_population 
@@ -916,10 +927,10 @@ pub async fn get_world_info_for_server(pool: &PgPool, server_id: i32) -> Result<
     
     // Get top 10 players by population (excluding Natars)
     let player_query = format!(
-        "SELECT player, alliance, COUNT(*) as village_count, SUM(population) as total_population 
+        "SELECT player, alliance, uid, COUNT(*) as village_count, SUM(population) as total_population 
          FROM {} 
          WHERE server_id = $1 AND player IS NOT NULL AND player != '' AND player != 'Natars'
-         GROUP BY player, alliance 
+         GROUP BY player, alliance, uid 
          ORDER BY total_population DESC 
          LIMIT 10",
         table_name
@@ -932,11 +943,21 @@ pub async fn get_world_info_for_server(pool: &PgPool, server_id: i32) -> Result<
     
     let top_players: Vec<PlayerStats> = player_rows
         .into_iter()
-        .map(|row| PlayerStats {
-            player_name: row.get("player"),
-            village_count: row.get::<i64, _>("village_count") as i32,
-            total_population: row.get::<Option<i64>, _>("total_population").unwrap_or(0),
-            alliance: row.get("alliance"),
+        .map(|row| {
+            let uid: Option<i32> = row.get("uid");
+            let profile_link = if let (Some(base_url), Some(player_uid)) = (&server_base_url, uid) {
+                Some(format!("{}/profile/{}", base_url, player_uid))
+            } else {
+                None
+            };
+            
+            PlayerStats {
+                player_name: row.get("player"),
+                village_count: row.get::<i64, _>("village_count") as i32,
+                total_population: row.get::<Option<i64>, _>("total_population").unwrap_or(0),
+                alliance: row.get("alliance"),
+                profile_link,
+            }
         })
         .collect();
     
