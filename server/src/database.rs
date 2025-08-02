@@ -310,51 +310,6 @@ pub async fn get_villages_by_server_and_date(pool: &PgPool, server_id: i32, date
     Ok(villages)
 }
 
-pub async fn get_villages_near(pool: &PgPool, x: i32, y: i32, radius: i32) -> Result<Vec<MapData>> {
-    // Get the latest table (most recent date)
-    let available_dates = get_available_dates(pool).await?;
-    
-    if available_dates.is_empty() {
-        return Ok(Vec::new()); // No tables available
-    }
-    
-    let latest_date = available_dates[0].0;
-    let table_name = get_table_name_for_date(latest_date);
-    
-    let query = format!(
-        r#"
-        SELECT id, village, x, y, population, player, alliance, worldid
-        FROM {} 
-        WHERE ABS(x - $1) <= $3 AND ABS(y - $2) <= $3
-        ORDER BY (ABS(x - $1) + ABS(y - $2)), population DESC
-        "#,
-        table_name
-    );
-    
-    let rows = sqlx::query(&query)
-        .bind(x)
-        .bind(y)
-        .bind(radius)
-        .fetch_all(pool)
-        .await?;
-
-    let villages: Vec<MapData> = rows
-        .into_iter()
-        .map(|row| MapData {
-            id: row.get::<i32, _>("id") as u32,
-            name: row.get("village"),
-            x: row.get("x"),
-            y: row.get("y"),
-            population: row.get::<i32, _>("population") as u32,
-            player: row.get("player"),
-            alliance: row.get("alliance"),
-            worldid: row.get::<Option<i32>, _>("worldid").map(|v| v as u32),
-        })
-        .collect();
-
-    Ok(villages)
-}
-
 pub async fn add_village(pool: &PgPool, name: &str, x: i32, y: i32, population: u32) -> Result<MapData> {
     let row = sqlx::query(
         "INSERT INTO villages (village, x, y, population, player, alliance) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, village, x, y, population, player, alliance, worldid"
@@ -681,6 +636,40 @@ pub async fn set_active_server(pool: &PgPool, server_id: i32) -> Result<()> {
         .bind(server_id)
         .execute(pool)
         .await?;
+    
+    Ok(())
+}
+
+pub async fn remove_server(pool: &PgPool, server_id: i32) -> Result<()> {
+    // First, check if this server is currently active
+    let active_server = get_active_server(pool).await?;
+    let is_removing_active = active_server.map_or(false, |server| server.id == server_id);
+    
+    // Get all available dates for this server to clean up data tables
+    let available_dates = get_available_dates_for_server(pool, server_id).await?;
+    
+    // Drop all data tables for this server
+    for (date, _) in available_dates {
+        let table_name = get_table_name_for_server_and_date(server_id, date);
+        let drop_query = format!("DROP TABLE IF EXISTS {}", table_name);
+        sqlx::query(&drop_query).execute(pool).await?;
+        println!("Dropped table: {}", table_name);
+    }
+    
+    // Remove the server from the servers table
+    sqlx::query("DELETE FROM servers WHERE id = $1")
+        .bind(server_id)
+        .execute(pool)
+        .await?;
+    
+    // If we removed the active server, set another server as active (if any exist)
+    if is_removing_active {
+        let remaining_servers = get_all_servers(pool).await?;
+        if let Some(first_server) = remaining_servers.first() {
+            set_active_server(pool, first_server.id).await?;
+            println!("Set server '{}' as active after removing the active server", first_server.name);
+        }
+    }
     
     Ok(())
 }

@@ -129,6 +129,7 @@
   border-radius: 4px;
   font-size: 1rem;
   background: white;
+  color: #495057;
   min-width: 300px;
 }
 
@@ -136,6 +137,11 @@
   outline: none;
   border-color: #007bff;
   box-shadow: 0 0 0 2px rgba(0, 123, 255, 0.25);
+}
+
+.server-select option {
+  color: #495057;
+  background: white;
 }
 
 .add-server-section {
@@ -223,30 +229,72 @@
   background: #5a6268;
 }
 
-.controls {
-  display: flex;
-  gap: 1rem;
-  justify-content: center;
-  margin-bottom: 2rem;
-  flex-wrap: wrap;
+.manage-servers-section {
+  margin-top: 1.5rem;
 }
 
-.controls button {
-  background: #646cff;
+.manage-servers-section h3 {
+  margin: 0 0 1rem 0;
+  color: #495057;
+  font-size: 1.1rem;
+}
+
+.servers-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.server-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.75rem;
+  background: white;
+  border: 1px solid #dee2e6;
+  border-radius: 4px;
+  transition: box-shadow 0.25s;
+}
+
+.server-item:hover {
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.server-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  flex-grow: 1;
+}
+
+.server-name {
+  font-weight: bold;
+  color: #495057;
+}
+
+.server-url {
+  font-size: 0.9rem;
+  color: #6c757d;
+  word-break: break-all;
+}
+
+.remove-server-btn {
+  background: #dc3545;
   color: white;
   border: none;
-  padding: 0.75rem 1.5rem;
-  border-radius: 8px;
+  padding: 0.5rem 1rem;
+  border-radius: 4px;
   cursor: pointer;
-  font-size: 1rem;
+  font-size: 0.9rem;
+  white-space: nowrap;
   transition: background-color 0.25s;
 }
 
-.controls button:hover:not(:disabled) {
-  background: #535bf2;
+.remove-server-btn:hover:not(:disabled) {
+  background: #c82333;
 }
 
-.controls button:disabled {
+.remove-server-btn:disabled {
   background: #6c757d;
   cursor: not-allowed;
   opacity: 0.6;
@@ -308,16 +356,6 @@
   
   .server-url-input {
     min-width: auto;
-  }
-  
-  .controls {
-    flex-direction: column;
-    align-items: center;
-  }
-  
-  .controls button {
-    width: 100%;
-    max-width: 300px;
   }
   
   .villages-grid {

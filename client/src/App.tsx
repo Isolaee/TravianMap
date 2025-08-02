@@ -168,24 +168,29 @@ function App() {
     }
   };
 
-  const fetchMapData = async (x?: number, y?: number) => {
+  const removeServer = async (serverId: number, serverName: string) => {
+    if (!confirm(`Are you sure you want to remove server "${serverName}"? This will delete all associated data and cannot be undone.`)) {
+      return;
+    }
+
     try {
-      // Use a subtle loading indicator instead of full loading state
-      const url = x !== undefined && y !== undefined 
-        ? `${serverUrl}/api/map?x=${x}&y=${y}`
-        : `${serverUrl}/api/map`;
-      
-      const response = await fetch(url);
+      const response = await fetch(`${serverUrl}/api/servers/${serverId}`, {
+        method: 'DELETE',
+      });
+
       if (response.ok) {
-        const data = await response.json();
-        setVillages(data);
-        setError(''); // Clear error on success
+        setNotification(`Server "${serverName}" removed successfully`);
+        // Clear notification after 5 seconds
+        setTimeout(() => setNotification(''), 5000);
+        
+        await fetchServers(); // Refresh server list
+        await fetchVillages(); // Refresh villages (might be empty if we removed active server)
       } else {
-        setError('Failed to fetch map data');
+        setError('Failed to remove server');
       }
     } catch (err) {
-      setError('Failed to fetch map data');
-      console.error('Map fetch error:', err);
+      setError('Failed to remove server');
+      console.error('Remove server error:', err);
     }
   };
 
@@ -238,6 +243,30 @@ function App() {
             </select>
           </div>
           
+          <div className="manage-servers-section">
+            <h3>Manage Servers:</h3>
+            <div className="servers-list">
+              {servers.map((server) => (
+                <div key={server.id} className="server-item">
+                  <div className="server-info">
+                    <span className="server-name">
+                      {server.name} {server.is_active && '(Active)'}
+                    </span>
+                    <span className="server-url">{server.url}</span>
+                  </div>
+                  <button 
+                    onClick={() => removeServer(server.id, server.name)}
+                    className="remove-server-btn"
+                    disabled={servers.length === 1}
+                    title={servers.length === 1 ? "Cannot remove the last server" : `Remove ${server.name}`}
+                  >
+                    🗑️ Remove
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+          
           <div className="add-server-section">
             {!showAddServer ? (
               <button 
@@ -284,27 +313,6 @@ function App() {
               </div>
             )}
           </div>
-        </div>
-
-        <div className="controls">
-          <button 
-            onClick={() => fetchVillages()}
-            disabled={isConnecting}
-          >
-            🏘️ Show All Villages
-          </button>
-          <button 
-            onClick={() => fetchMapData(0, 0)}
-            disabled={isConnecting}
-          >
-            📍 Show Near Origin (0,0)
-          </button>
-          <button 
-            onClick={() => fetchMapData(10, 10)}
-            disabled={isConnecting}
-          >
-            🗺️ Show Near (10,10)
-          </button>
         </div>
 
         {loading ? (

@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, State},
     http::StatusCode,
     response::Json,
     routing::{delete, get, post, put},
@@ -29,13 +29,6 @@ struct MapData {
     player: Option<String>,
     alliance: Option<String>,
     worldid: Option<u32>,
-}
-
-#[derive(Deserialize)]
-struct MapQuery {
-    x: Option<i32>,
-    y: Option<i32>,
-    radius: Option<i32>,
 }
 
 #[derive(Deserialize)]
@@ -80,11 +73,11 @@ async fn main() -> Result<()> {
     let app = Router::new()
         .route("/", get(root))
         .route("/health", get(health))
-        .route("/api/map", get(get_map_data))
         .route("/api/villages", get(get_villages).post(create_village))
         .route("/api/villages/:id", put(update_village).delete(delete_village))
         .route("/api/servers", get(get_servers).post(add_server_api))
         .route("/api/servers/:id/activate", put(activate_server_api))
+        .route("/api/servers/:id", delete(remove_server_api))
         .layer(CorsLayer::permissive())
         .with_state(pool);
 
@@ -114,24 +107,6 @@ async fn health() -> Json<HealthResponse> {
         status: "healthy".to_string(),
         message: "Server is operational".to_string(),
     })
-}
-
-async fn get_map_data(State(pool): State<PgPool>, Query(params): Query<MapQuery>) -> Result<Json<Vec<MapData>>, StatusCode> {
-    let radius = params.radius.unwrap_or(10);
-    
-    let villages = if let (Some(x), Some(y)) = (params.x, params.y) {
-        database::get_villages_near(&pool, x, y, radius).await
-    } else {
-        database::get_all_villages(&pool).await
-    };
-
-    match villages {
-        Ok(villages) => Ok(Json(villages)),
-        Err(e) => {
-            eprintln!("Database error: {}", e);
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
-        }
-    }
 }
 
 async fn get_villages(State(pool): State<PgPool>) -> Result<Json<Vec<MapData>>, StatusCode> {
@@ -273,6 +248,22 @@ async fn activate_server_api(
         },
         Err(e) => {
             eprintln!("Failed to activate server: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+async fn remove_server_api(
+    State(pool): State<PgPool>,
+    Path(server_id): Path<i32>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    match database::remove_server(&pool, server_id).await {
+        Ok(_) => Ok(Json(serde_json::json!({
+            "status": "success",
+            "message": "Server removed successfully"
+        }))),
+        Err(e) => {
+            eprintln!("Failed to remove server: {}", e);
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
