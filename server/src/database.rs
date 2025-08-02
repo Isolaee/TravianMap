@@ -1,14 +1,28 @@
 use sqlx::{PgPool, Row};
 use anyhow::Result;
 use crate::MapData;
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Server {
+    pub id: i32,
+    pub name: String,
+    pub url: String,
+    pub is_active: bool,
+}
 
 pub async fn create_pool(database_url: &str) -> Result<PgPool> {
     let pool = PgPool::connect(database_url).await?;
     Ok(pool)
 }
 
+fn get_table_name_for_server_and_date(server_id: i32, date: chrono::NaiveDate) -> String {
+    format!("villages_server_{}_{}", server_id, date.format("%Y_%m_%d"))
+}
+
 fn get_table_name_for_date(date: chrono::NaiveDate) -> String {
-    format!("villages_{}", date.format("%Y_%m_%d"))
+    // Default server (id = 1) for backward compatibility
+    get_table_name_for_server_and_date(1, date)
 }
 
 fn get_today_table_name() -> String {
@@ -16,14 +30,15 @@ fn get_today_table_name() -> String {
     get_table_name_for_date(today)
 }
 
-pub async fn create_table_for_date(pool: &PgPool, date: chrono::NaiveDate) -> Result<String> {
-    let table_name = get_table_name_for_date(date);
+pub async fn create_table_for_server_and_date(pool: &PgPool, server_id: i32, date: chrono::NaiveDate) -> Result<String> {
+    let table_name = get_table_name_for_server_and_date(server_id, date);
     
-    // Create the villages table with Travian x_world structure for the specific date
+    // Create the villages table with Travian x_world structure for the specific server and date
     let create_query = format!(
         r#"
         CREATE TABLE IF NOT EXISTS {} (
             id SERIAL PRIMARY KEY,
+            server_id INTEGER NOT NULL,
             worldid INTEGER,
             x INTEGER NOT NULL,
             y INTEGER NOT NULL,
@@ -50,19 +65,40 @@ pub async fn create_table_for_date(pool: &PgPool, date: chrono::NaiveDate) -> Re
         .await?;
 
     // Create indexes for the new table
-    let coord_index = format!("CREATE INDEX IF NOT EXISTS idx_{}_coordinates ON {} (x, y)", table_name, table_name);
+    let coord_index = format!("CREATE INDEX IF NOT EXISTS idx_{}_coordinates ON {} (server_id, x, y)", table_name, table_name);
     sqlx::query(&coord_index).execute(pool).await?;
 
-    let pop_index = format!("CREATE INDEX IF NOT EXISTS idx_{}_population ON {} (population)", table_name, table_name);
+    let pop_index = format!("CREATE INDEX IF NOT EXISTS idx_{}_population ON {} (server_id, population)", table_name, table_name);
     sqlx::query(&pop_index).execute(pool).await?;
 
-    let world_index = format!("CREATE INDEX IF NOT EXISTS idx_{}_worldid ON {} (worldid)", table_name, table_name);
+    let world_index = format!("CREATE INDEX IF NOT EXISTS idx_{}_worldid ON {} (server_id, worldid)", table_name, table_name);
     sqlx::query(&world_index).execute(pool).await?;
 
     Ok(table_name)
 }
 
+pub async fn create_table_for_date(pool: &PgPool, date: chrono::NaiveDate) -> Result<String> {
+    // Default to server_id = 1 for backward compatibility
+    create_table_for_server_and_date(pool, 1, date).await
+}
+
 pub async fn create_tables(pool: &PgPool) -> Result<()> {
+    // Create the servers table
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS servers (
+            id SERIAL PRIMARY KEY,
+            name VARCHAR(255) NOT NULL UNIQUE,
+            url VARCHAR(512) NOT NULL,
+            is_active BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
     // Create the default villages table (for backward compatibility)
     let today = chrono::Utc::now().date_naive();
     create_table_for_date(pool, today).await?;
@@ -169,19 +205,71 @@ pub async fn insert_sample_data(pool: &PgPool) -> Result<()> {
 }
 
 pub async fn get_all_villages(pool: &PgPool) -> Result<Vec<MapData>> {
-    // Get the latest table (most recent date)
-    let available_dates = get_available_dates(pool).await?;
+    // Get the active server
+    let active_server = get_active_server(pool).await?;
+    
+    if let Some(server) = active_server {
+        get_villages_for_server(pool, server.id).await
+    } else {
+        Ok(Vec::new()) // No active server
+    }
+}
+
+pub async fn get_villages_for_server(pool: &PgPool, server_id: i32) -> Result<Vec<MapData>> {
+    // Get the latest table for this server (most recent date)
+    let available_dates = get_available_dates_for_server(pool, server_id).await?;
     
     if available_dates.is_empty() {
-        return Ok(Vec::new()); // No tables available
+        return Ok(Vec::new()); // No tables available for this server
     }
     
     let latest_date = available_dates[0].0;
-    get_villages_by_date(pool, latest_date).await
+    get_villages_by_server_and_date(pool, server_id, latest_date).await
 }
 
-pub async fn get_villages_by_date(pool: &PgPool, date: chrono::NaiveDate) -> Result<Vec<MapData>> {
-    let table_name = get_table_name_for_date(date);
+pub async fn get_available_dates_for_server(pool: &PgPool, server_id: i32) -> Result<Vec<(chrono::NaiveDate, i32)>> {
+    // Query for all tables that match the villages_server_{server_id}_YYYY_MM_DD pattern
+    let pattern = format!("villages_server_{}_", server_id);
+    let rows = sqlx::query(
+        r#"
+        SELECT table_name 
+        FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_name LIKE $1
+        AND table_name ~ $2
+        ORDER BY table_name DESC
+        "#
+    )
+    .bind(format!("{}%", pattern))
+    .bind(format!("^villages_server_{}_[0-9]{{4}}_[0-9]{{2}}_[0-9]{{2}}$", server_id))
+    .fetch_all(pool)
+    .await?;
+
+    let mut result = Vec::new();
+    
+    for row in rows {
+        let table_name: String = row.get("table_name");
+        
+        // Extract date from table name (format: villages_server_{server_id}_YYYY_MM_DD)
+        if let Some(date_part) = table_name.strip_prefix(&format!("villages_server_{}_", server_id)) {
+            if let Ok(date) = chrono::NaiveDate::parse_from_str(date_part, "%Y_%m_%d") {
+                // Get village count for this table
+                let count_query = format!("SELECT COUNT(*) FROM {} WHERE server_id = $1", table_name);
+                let count: i64 = sqlx::query_scalar(&count_query)
+                    .bind(server_id)
+                    .fetch_one(pool)
+                    .await?;
+                
+                result.push((date, count as i32));
+            }
+        }
+    }
+    
+    Ok(result)
+}
+
+pub async fn get_villages_by_server_and_date(pool: &PgPool, server_id: i32, date: chrono::NaiveDate) -> Result<Vec<MapData>> {
+    let table_name = get_table_name_for_server_and_date(server_id, date);
     
     // Check if table exists
     let table_exists: bool = sqlx::query_scalar(
@@ -196,11 +284,12 @@ pub async fn get_villages_by_date(pool: &PgPool, date: chrono::NaiveDate) -> Res
     }
     
     let query = format!(
-        "SELECT id, village, x, y, population, player, alliance, worldid FROM {} ORDER BY population DESC",
+        "SELECT id, village, x, y, population, player, alliance, worldid FROM {} WHERE server_id = $1 ORDER BY population DESC",
         table_name
     );
     
     let rows = sqlx::query(&query)
+        .bind(server_id)
         .fetch_all(pool)
         .await?;
 
@@ -351,14 +440,25 @@ pub async fn clear_todays_villages(pool: &PgPool) -> Result<()> {
 }
 
 pub async fn execute_sql_with_date_tables(pool: &PgPool, sql_content: &str) -> Result<usize> {
+    // Get the active server
+    let active_server = get_active_server(pool).await?;
+    
+    if let Some(server) = active_server {
+        execute_sql_for_server(pool, sql_content, server.id).await
+    } else {
+        Err(anyhow::anyhow!("No active server found"))
+    }
+}
+
+pub async fn execute_sql_for_server(pool: &PgPool, sql_content: &str, server_id: i32) -> Result<usize> {
     let today = chrono::Utc::now().date_naive();
     
     // Create table for today if it doesn't exist
-    let table_name = create_table_for_date(pool, today).await?;
+    let table_name = create_table_for_server_and_date(pool, server_id, today).await?;
     
-    // Clear existing data for today
-    let delete_query = format!("DELETE FROM {}", table_name);
-    sqlx::query(&delete_query).execute(pool).await?;
+    // Clear existing data for today for this server
+    let delete_query = format!("DELETE FROM {} WHERE server_id = $1", table_name);
+    sqlx::query(&delete_query).bind(server_id).execute(pool).await?;
     
     // Parse the SQL content to extract INSERT statements for x_world table
     let mut village_count = 0;
@@ -387,7 +487,7 @@ pub async fn execute_sql_with_date_tables(pool: &PgPool, sql_content: &str) -> R
                         
                         // Parse the comma-separated values
                         if let Ok(parsed_village) = parse_x_world_values(values_str) {
-                            match insert_parsed_village_to_table(pool, parsed_village, &table_name).await {
+                            match insert_parsed_village_to_table_with_server(pool, parsed_village, &table_name, server_id).await {
                                 Ok(_) => village_count += 1,
                                 Err(e) => {
                                     eprintln!("Failed to insert village: {}", e);
@@ -505,16 +605,17 @@ fn parse_x_world_values(values_str: &str) -> Result<ParsedVillage> {
     })
 }
 
-async fn insert_parsed_village_to_table(pool: &PgPool, village: ParsedVillage, table_name: &str) -> Result<()> {
+async fn insert_parsed_village_to_table_with_server(pool: &PgPool, village: ParsedVillage, table_name: &str, server_id: i32) -> Result<()> {
     let query = format!(
         r#"
-        INSERT INTO {} (worldid, x, y, tid, vid, village, uid, player, aid, alliance, population)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        INSERT INTO {} (server_id, worldid, x, y, tid, vid, village, uid, player, aid, alliance, population)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
         "#,
         table_name
     );
     
     sqlx::query(&query)
+        .bind(server_id)
         .bind(village.worldid)
         .bind(village.x)
         .bind(village.y)
@@ -530,4 +631,121 @@ async fn insert_parsed_village_to_table(pool: &PgPool, village: ParsedVillage, t
         .await?;
     
     Ok(())
+}
+
+// Server management functions
+pub async fn get_all_servers(pool: &PgPool) -> Result<Vec<Server>> {
+    let rows = sqlx::query("SELECT id, name, url, is_active FROM servers ORDER BY name")
+        .fetch_all(pool)
+        .await?;
+
+    let servers: Vec<Server> = rows
+        .into_iter()
+        .map(|row| Server {
+            id: row.get("id"),
+            name: row.get("name"),
+            url: row.get("url"),
+            is_active: row.get("is_active"),
+        })
+        .collect();
+
+    Ok(servers)
+}
+
+pub async fn add_server(pool: &PgPool, name: &str, url: &str) -> Result<Server> {
+    let row = sqlx::query(
+        "INSERT INTO servers (name, url, is_active) VALUES ($1, $2, $3) RETURNING id, name, url, is_active"
+    )
+    .bind(name)
+    .bind(url)
+    .bind(false) // New servers are not active by default
+    .fetch_one(pool)
+    .await?;
+
+    Ok(Server {
+        id: row.get("id"),
+        name: row.get("name"),
+        url: row.get("url"),
+        is_active: row.get("is_active"),
+    })
+}
+
+pub async fn set_active_server(pool: &PgPool, server_id: i32) -> Result<()> {
+    // First, set all servers to inactive
+    sqlx::query("UPDATE servers SET is_active = FALSE")
+        .execute(pool)
+        .await?;
+    
+    // Then set the specified server as active
+    sqlx::query("UPDATE servers SET is_active = TRUE WHERE id = $1")
+        .bind(server_id)
+        .execute(pool)
+        .await?;
+    
+    Ok(())
+}
+
+pub async fn get_latest_data_date_for_server(pool: &PgPool, server_id: i32) -> Result<Option<chrono::NaiveDate>> {
+    let available_dates = get_available_dates_for_server(pool, server_id).await?;
+    
+    if available_dates.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(available_dates[0].0)) // Dates are sorted DESC, so first is latest
+    }
+}
+
+pub async fn is_new_data_needed_for_server(pool: &PgPool, server_id: i32) -> Result<bool> {
+    let today = chrono::Utc::now().date_naive();
+    
+    match get_latest_data_date_for_server(pool, server_id).await? {
+        Some(latest_date) => Ok(latest_date < today),
+        None => Ok(true), // No data exists, so we need to load it
+    }
+}
+
+pub async fn auto_load_data_for_server(pool: &PgPool, server: &Server) -> Result<String> {
+    // Check if new data is needed
+    if !is_new_data_needed_for_server(pool, server.id).await? {
+        return Ok("Data is up to date".to_string());
+    }
+
+    // Construct the SQL URL based on the server URL
+    let sql_url = format!("{}/map.sql", server.url.trim_end_matches('/'));
+    
+    println!("Auto-loading data for server '{}' from: {}", server.name, sql_url);
+
+    // Fetch the SQL file from the URL
+    let client = reqwest::Client::new();
+    let response = client.get(&sql_url).send().await
+        .map_err(|e| anyhow::anyhow!("Failed to fetch SQL from {}: {}", sql_url, e))?;
+
+    if !response.status().is_success() {
+        return Err(anyhow::anyhow!("HTTP error {}: Failed to fetch SQL from {}", response.status(), sql_url));
+    }
+
+    let sql_content = response.text().await
+        .map_err(|e| anyhow::anyhow!("Failed to read SQL response: {}", e))?;
+
+    // Execute the SQL for this specific server
+    let count = execute_sql_for_server(pool, &sql_content, server.id).await?;
+    
+    Ok(format!("Successfully loaded {} villages for server '{}'", count, server.name))
+}
+
+pub async fn get_active_server(pool: &PgPool) -> Result<Option<Server>> {
+    let row = sqlx::query("SELECT id, name, url, is_active FROM servers WHERE is_active = TRUE LIMIT 1")
+        .fetch_optional(pool)
+        .await?;
+
+    if let Some(row) = row {
+        Ok(Some(Server {
+            id: row.get("id"),
+            name: row.get("name"),
+            url: row.get("url"),
+            is_active: row.get("is_active"),
+        }))
+    } else {
+        Ok(None)
+    }
 }

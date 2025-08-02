@@ -51,11 +51,6 @@ struct UpdatePopulationRequest {
     population: u32,
 }
 
-#[derive(Deserialize)]
-struct LoadSqlRequest {
-    url: String,
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     // Load environment variables from .env file
@@ -88,9 +83,8 @@ async fn main() -> Result<()> {
         .route("/api/map", get(get_map_data))
         .route("/api/villages", get(get_villages).post(create_village))
         .route("/api/villages/:id", put(update_village).delete(delete_village))
-        .route("/api/load-sql", post(load_sql_from_url))
-        .route("/api/available-dates", get(get_available_dates_api))
-        .route("/api/villages-by-date/:date", get(get_villages_by_date_api))
+        .route("/api/servers", get(get_servers).post(add_server_api))
+        .route("/api/servers/:id/activate", put(activate_server_api))
         .layer(CorsLayer::permissive())
         .with_state(pool);
 
@@ -192,96 +186,93 @@ async fn delete_village(
     }
 }
 
-async fn load_sql_from_url(
+#[derive(Deserialize)]
+struct AddServerRequest {
+    name: String,
+    url: String,
+}
+
+async fn get_servers(
     State(pool): State<PgPool>,
-    Json(request): Json<LoadSqlRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    println!("Loading SQL from URL: {}", request.url);
-
-    // Fetch the SQL file from the URL
-    let client = reqwest::Client::new();
-    let response = match client.get(&request.url).send().await {
-        Ok(resp) => resp,
+    match database::get_all_servers(&pool).await {
+        Ok(servers) => Ok(Json(serde_json::json!({
+            "status": "success",
+            "servers": servers
+        }))),
         Err(e) => {
-            eprintln!("Failed to fetch URL: {}", e);
-            return Err(StatusCode::BAD_REQUEST);
+            eprintln!("Failed to get servers: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
-    };
+    }
+}
 
-    if !response.status().is_success() {
-        eprintln!("HTTP error: {}", response.status());
+async fn add_server_api(
+    State(pool): State<PgPool>,
+    Json(request): Json<AddServerRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    if request.name.trim().is_empty() || request.url.trim().is_empty() {
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let sql_content = match response.text().await {
-        Ok(content) => content,
-        Err(e) => {
-            eprintln!("Failed to read response: {}", e);
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        }
-    };
-
-    // Parse and execute the SQL using date tables
-    match database::execute_sql_with_date_tables(&pool, &sql_content).await {
-        Ok(count) => {
-            println!("Successfully loaded {} villages from SQL", count);
-            Ok(Json(serde_json::json!({
-                "status": "success",
-                "message": format!("Successfully loaded {} villages from SQL file", count)
-            })))
-        },
-        Err(e) => {
-            eprintln!("Failed to execute SQL: {}", e);
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
-        }
-    }
-}
-
-async fn get_available_dates_api(
-    State(pool): State<PgPool>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    match database::get_available_dates(&pool).await {
-        Ok(dates) => {
-            let formatted_dates: Vec<serde_json::Value> = dates
-                .into_iter()
-                .map(|(date, count)| serde_json::json!({
-                    "date": date.format("%Y-%m-%d").to_string(),
-                    "village_count": count
-                }))
-                .collect();
-            
-            Ok(Json(serde_json::json!({
-                "status": "success",
-                "dates": formatted_dates
-            })))
-        },
-        Err(e) => {
-            eprintln!("Failed to get available dates: {}", e);
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
-        }
-    }
-}
-
-async fn get_villages_by_date_api(
-    State(pool): State<PgPool>,
-    Path(date_str): Path<String>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    // Parse the date string
-    let date = match chrono::NaiveDate::parse_from_str(&date_str, "%Y-%m-%d") {
-        Ok(d) => d,
-        Err(_) => {
-            return Err(StatusCode::BAD_REQUEST);
-        }
-    };
-    
-    match database::get_villages_by_date(&pool, date).await {
-        Ok(villages) => Ok(Json(serde_json::json!({
+    match database::add_server(&pool, &request.name.trim(), &request.url.trim()).await {
+        Ok(server) => Ok(Json(serde_json::json!({
             "status": "success",
-            "date": date_str,
-            "villages": villages
+            "server": server
         }))),
         Err(e) => {
-            eprintln!("Failed to get villages for date {}: {}", date_str, e);
+            eprintln!("Failed to add server: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+async fn activate_server_api(
+    State(pool): State<PgPool>,
+    Path(server_id): Path<i32>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    // First activate the server
+    match database::set_active_server(&pool, server_id).await {
+        Ok(_) => {
+            // Get the activated server details
+            let server = match database::get_all_servers(&pool).await {
+                Ok(servers) => servers.into_iter().find(|s| s.id == server_id),
+                Err(e) => {
+                    eprintln!("Failed to get server details: {}", e);
+                    return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                }
+            };
+
+            if let Some(server) = server {
+                // Check if new data needs to be loaded and load it automatically
+                match database::auto_load_data_for_server(&pool, &server).await {
+                    Ok(load_message) => {
+                        println!("Auto-load result for server '{}': {}", server.name, load_message);
+                        Ok(Json(serde_json::json!({
+                            "status": "success",
+                            "message": "Server activated successfully",
+                            "auto_load_message": load_message
+                        })))
+                    },
+                    Err(e) => {
+                        eprintln!("Failed to auto-load data for server '{}': {}", server.name, e);
+                        // Still return success for server activation, but include the error
+                        Ok(Json(serde_json::json!({
+                            "status": "success",
+                            "message": "Server activated successfully",
+                            "auto_load_message": format!("Failed to auto-load data: {}", e)
+                        })))
+                    }
+                }
+            } else {
+                Ok(Json(serde_json::json!({
+                    "status": "success",
+                    "message": "Server activated successfully"
+                })))
+            }
+        },
+        Err(e) => {
+            eprintln!("Failed to activate server: {}", e);
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }

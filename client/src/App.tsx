@@ -17,9 +17,11 @@ interface HealthResponse {
   message: string;
 }
 
-interface AvailableDate {
-  date: string;
-  village_count: number;
+interface Server {
+  id: number;
+  name: string;
+  url: string;
+  is_active: boolean;
 }
 
 function App() {
@@ -28,11 +30,12 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>('');
   const [isConnecting, setIsConnecting] = useState(false);
-  const [sqlUrl, setSqlUrl] = useState<string>('');
-  const [isLoadingSql, setIsLoadingSql] = useState(false);
-  const [sqlMessage, setSqlMessage] = useState<string>('');
-  const [availableDates, setAvailableDates] = useState<AvailableDate[]>([]);
-  const [selectedDate, setSelectedDate] = useState<string>('latest');
+  const [servers, setServers] = useState<Server[]>([]);
+  const [currentServer, setCurrentServer] = useState<Server | null>(null);
+  const [newServerName, setNewServerName] = useState<string>('');
+  const [newServerUrl, setNewServerUrl] = useState<string>('');
+  const [showAddServer, setShowAddServer] = useState(false);
+  const [notification, setNotification] = useState<string>('');
   
   const serverUrl = 'http://127.0.0.1:3001'; // Fixed server URL
 
@@ -41,7 +44,7 @@ function App() {
       setIsConnecting(true);
       setError('');
       
-      Promise.all([fetchServerStatus(), fetchVillages(), fetchAvailableDates()])
+      Promise.all([fetchServerStatus(), fetchVillages(), fetchServers()])
         .finally(() => {
           setIsConnecting(false);
         });
@@ -50,15 +53,6 @@ function App() {
     // Initial load
     fetchData();
   }, []); // No dependencies since serverUrl is now fixed
-
-  // Handle date selection changes
-  useEffect(() => {
-    if (selectedDate === 'latest') {
-      fetchVillages();
-    } else {
-      fetchVillagesByDate(selectedDate);
-    }
-  }, [selectedDate]);
 
   const fetchServerStatus = async () => {
     try {
@@ -100,36 +94,77 @@ function App() {
     }
   };
 
-  const fetchAvailableDates = async () => {
+  const fetchServers = async () => {
     try {
-      const response = await fetch(`${serverUrl}/api/available-dates`);
+      const response = await fetch(`${serverUrl}/api/servers`);
       if (response.ok) {
         const data = await response.json();
-        setAvailableDates(data.dates || []);
+        setServers(data.servers || []);
+        // Set current server to the active one
+        const activeServer = data.servers?.find((s: Server) => s.is_active);
+        setCurrentServer(activeServer || null);
       } else {
-        console.error('Failed to fetch available dates');
+        console.error('Failed to fetch servers');
       }
     } catch (err) {
-      console.error('Error fetching available dates:', err);
+      console.error('Error fetching servers:', err);
     }
   };
 
-  const fetchVillagesByDate = async (date: string) => {
+  const addServer = async () => {
+    if (!newServerName.trim() || !newServerUrl.trim()) return;
+    
     try {
-      setLoading(true);
-      const response = await fetch(`${serverUrl}/api/villages-by-date/${date}`);
+      const response = await fetch(`${serverUrl}/api/servers`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          name: newServerName.trim(),
+          url: newServerUrl.trim()
+        }),
+      });
+
       if (response.ok) {
-        const data = await response.json();
-        setVillages(data.villages || []);
-        setError('');
+        setNewServerName('');
+        setNewServerUrl('');
+        setShowAddServer(false);
+        await fetchServers(); // Refresh server list
       } else {
-        setError('Failed to fetch villages for selected date');
+        setError('Failed to add server');
       }
     } catch (err) {
-      setError('Failed to fetch data for selected date');
-      console.error('Fetch by date error:', err);
-    } finally {
-      setLoading(false);
+      setError('Failed to add server');
+      console.error('Add server error:', err);
+    }
+  };
+
+  const setActiveServer = async (serverId: number) => {
+    try {
+      const response = await fetch(`${serverUrl}/api/servers/${serverId}/activate`, {
+        method: 'PUT',
+      });
+
+      if (response.ok) {
+        const result = await response.json();
+        
+        // Show auto-load message if available
+        if (result.auto_load_message) {
+          console.log('Auto-load result:', result.auto_load_message);
+          setNotification(result.auto_load_message);
+          // Clear notification after 5 seconds
+          setTimeout(() => setNotification(''), 5000);
+        }
+        
+        await fetchServers(); // Refresh server list
+        await fetchVillages(); // Refresh villages for new server
+      } else {
+        setError('Failed to set active server');
+      }
+    } catch (err) {
+      setError('Failed to set active server');
+      console.error('Set active server error:', err);
     }
   };
 
@@ -154,40 +189,6 @@ function App() {
     }
   };
 
-  const loadSqlFromUrl = async () => {
-    if (!sqlUrl.trim()) {
-      setSqlMessage('Please enter a SQL file URL');
-      return;
-    }
-
-    setIsLoadingSql(true);
-    setSqlMessage('');
-
-    try {
-      const response = await fetch(`${serverUrl}/api/load-sql`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ url: sqlUrl }),
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        setSqlMessage(data.message || 'SQL loaded successfully!');
-        // Refresh both villages data and available dates
-        await Promise.all([fetchVillages(), fetchAvailableDates()]);
-      } else {
-        setSqlMessage('Failed to load SQL file');
-      }
-    } catch (err) {
-      setSqlMessage('Failed to load SQL file');
-      console.error('SQL load error:', err);
-    } finally {
-      setIsLoadingSql(false);
-    }
-  };
-
   return (
     <div className="App">
       <header className="app-header">
@@ -209,46 +210,80 @@ function App() {
         </div>
       </header>
 
-      <main>
-        <div className="sql-config">
-          <label htmlFor="sql-url">Load SQL Data:</label>
-          <input
-            id="sql-url"
-            type="text"
-            value={sqlUrl}
-            onChange={(e) => setSqlUrl(e.target.value)}
-            placeholder="Enter URL to SQL file (e.g., https://example.com/villages.sql)"
-            className="sql-url-input"
-          />
-          <button 
-            onClick={loadSqlFromUrl}
-            disabled={isLoadingSql || !sqlUrl.trim()}
-            className="load-sql-btn"
-          >
-            {isLoadingSql ? '🔄 Loading...' : '📥 Load SQL'}
-          </button>
-          {sqlMessage && (
-            <div className={`sql-message ${sqlMessage.includes('Success') ? 'success' : 'error'}`}>
-              {sqlMessage}
-            </div>
-          )}
+      {notification && (
+        <div className="notification">
+          ℹ️ {notification}
         </div>
+      )}
 
-        <div className="date-selector">
-          <label htmlFor="date-select">View Data From:</label>
-          <select
-            id="date-select"
-            value={selectedDate}
-            onChange={(e) => setSelectedDate(e.target.value)}
-            className="date-select"
-          >
-            <option value="latest">Latest Data</option>
-            {availableDates.map((dateInfo) => (
-              <option key={dateInfo.date} value={dateInfo.date}>
-                {dateInfo.date} ({dateInfo.village_count.toLocaleString()} villages)
-              </option>
-            ))}
-          </select>
+      <main>
+        <div className="server-management">
+          <div className="current-server">
+            <label htmlFor="server-select">Current Server:</label>
+            <select
+              id="server-select"
+              value={currentServer?.id || ''}
+              onChange={(e) => {
+                const serverId = parseInt(e.target.value);
+                if (serverId) setActiveServer(serverId);
+              }}
+              className="server-select"
+            >
+              <option value="">Select a server...</option>
+              {servers.map((server) => (
+                <option key={server.id} value={server.id}>
+                  {server.name} ({server.url})
+                </option>
+              ))}
+            </select>
+          </div>
+          
+          <div className="add-server-section">
+            {!showAddServer ? (
+              <button 
+                onClick={() => setShowAddServer(true)}
+                className="add-server-btn"
+              >
+                ➕ Add Server
+              </button>
+            ) : (
+              <div className="add-server-form">
+                <input
+                  type="text"
+                  value={newServerName}
+                  onChange={(e) => setNewServerName(e.target.value)}
+                  placeholder="Server name (e.g., 'ts1.travian.com')"
+                  className="server-input"
+                />
+                <input
+                  type="text"
+                  value={newServerUrl}
+                  onChange={(e) => setNewServerUrl(e.target.value)}
+                  placeholder="SQL URL (e.g., 'https://ts1.travian.com/map.sql')"
+                  className="server-input"
+                />
+                <div className="add-server-buttons">
+                  <button 
+                    onClick={addServer}
+                    disabled={!newServerName.trim() || !newServerUrl.trim()}
+                    className="save-server-btn"
+                  >
+                    💾 Save
+                  </button>
+                  <button 
+                    onClick={() => {
+                      setShowAddServer(false);
+                      setNewServerName('');
+                      setNewServerUrl('');
+                    }}
+                    className="cancel-server-btn"
+                  >
+                    ❌ Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
 
         <div className="controls">
