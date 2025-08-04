@@ -79,6 +79,7 @@ async fn main() -> Result<()> {
         .route("/api/servers/:id/activate", put(activate_server_api))
         .route("/api/servers/:id", delete(remove_server_api))
         .route("/api/world-info", get(get_world_info))
+        .route("/api/alliance-info", get(get_alliance_info_api))
         .route("/api/afk-villages", post(find_afk_villages_api))
         .layer(CorsLayer::permissive())
         .with_state(pool);
@@ -249,6 +250,21 @@ async fn get_world_info(State(pool): State<PgPool>) -> Result<Json<serde_json::V
         }))),
         Err(e) => {
             eprintln!("Failed to get world info: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+async fn get_alliance_info_api(
+    State(pool): State<PgPool>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    match database::get_alliance_info(&pool).await {
+        Ok(alliance_info) => Ok(Json(serde_json::json!({
+            "status": "success",
+            "data": alliance_info
+        }))),
+        Err(e) => {
+            eprintln!("Failed to get alliance info: {}", e);
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }

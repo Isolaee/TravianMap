@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import './App.css'
 import { WorldInfoModal } from './WorldInfo'
 import { AfkFinderModal } from './AfkFinder'
+import { AllianceInfoModal } from './AllianceInfo'
 
 interface Village {
   id: number;
@@ -49,6 +50,23 @@ interface WorldInfo {
   total_population: number;
 }
 
+interface AllianceStats {
+  alliance_name: string;
+  alliance_id?: number;
+  member_count: number;
+  village_count: number;
+  total_population: number;
+  average_population_per_village: number;
+  population_growth: number;
+  growth_percentage: number;
+  alliance_link?: string;
+}
+
+interface AllianceInfo {
+  top_alliances: AllianceStats[];
+  total_alliances: number;
+}
+
 interface AfkVillage {
   village_name: string;
   x: number;
@@ -82,6 +100,10 @@ function App() {
   const [showAfkFinder, setShowAfkFinder] = useState(false);
   const [afkVillages, setAfkVillages] = useState<AfkVillage[]>([]);
   const [loadingAfk, setLoadingAfk] = useState(false);
+  const [showAllianceInfo, setShowAllianceInfo] = useState(false);
+  const [allianceInfo, setAllianceInfo] = useState<AllianceInfo | null>(null);
+  const [loadingAllianceInfo, setLoadingAllianceInfo] = useState(false);
+  const [allianceInfoError, setAllianceInfoError] = useState<string | null>(null);
   
   const serverUrl = 'http://127.0.0.1:3001'; // Fixed server URL
 
@@ -262,6 +284,33 @@ function App() {
     }
   };
 
+  const fetchAllianceInfo = async () => {
+    if (!currentServer) {
+      setError('No active server selected');
+      return;
+    }
+
+    try {
+      setLoadingAllianceInfo(true);
+      setAllianceInfoError(null);
+      const response = await fetch(`${serverUrl}/api/alliance-info`);
+      
+      if (response.ok) {
+        const data = await response.json();
+        setAllianceInfo(data.data);
+        setShowAllianceInfo(true);
+        setAllianceInfoError(null);
+      } else {
+        setAllianceInfoError('Failed to fetch alliance info');
+      }
+    } catch (err) {
+      setAllianceInfoError('Failed to fetch alliance info');
+      console.error('Alliance info fetch error:', err);
+    } finally {
+      setLoadingAllianceInfo(false);
+    }
+  };
+
   const searchAfkVillages = async (params: AfkSearchParams) => {
     if (!currentServer) {
       setError('No active server selected');
@@ -359,6 +408,13 @@ function App() {
                   className="tool-btn afk-finder-btn"
                 >
                   {loadingAfk ? '🔄 Searching...' : '🎯 Find AFKs'}
+                </button>
+                <button 
+                  onClick={fetchAllianceInfo}
+                  disabled={loadingAllianceInfo}
+                  className="tool-btn alliance-info-btn"
+                >
+                  {loadingAllianceInfo ? '🔄 Loading...' : '🏛️ Alliance Info'}
                 </button>
               </div>
             </div>
@@ -494,6 +550,13 @@ function App() {
           onSearch={searchAfkVillages}
           afkVillages={afkVillages}
           loading={loadingAfk}
+        />
+      )}
+
+      {showAllianceInfo && allianceInfo && (
+        <AllianceInfoModal 
+          allianceInfo={allianceInfo}
+          onClose={() => setShowAllianceInfo(false)}
         />
       )}
     </div>

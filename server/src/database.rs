@@ -842,6 +842,25 @@ pub struct AfkVillage {
     pub days_without_growth: i32,
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+pub struct AllianceStats {
+    pub alliance_name: String,
+    pub alliance_id: Option<i32>,
+    pub member_count: i32,
+    pub village_count: i32,
+    pub total_population: i64,
+    pub average_population_per_village: i32,
+    pub population_growth: i64,
+    pub growth_percentage: f64,
+    pub alliance_link: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct AllianceInfo {
+    pub top_alliances: Vec<AllianceStats>,
+    pub total_alliances: i32,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct AfkSearchParams {
     pub quadrant: String, // "NE", "SE", "SW", "NW"
@@ -1138,4 +1157,169 @@ pub async fn find_afk_villages_for_server(pool: &PgPool, server_id: i32, params:
     afk_villages.sort_by(|a, b| b.population.cmp(&a.population));
     
     Ok(afk_villages)
+}
+
+pub async fn get_alliance_info(pool: &PgPool) -> Result<AllianceInfo> {
+    // Get the active server
+    let active_server = get_active_server(pool).await?;
+    
+    if let Some(server) = active_server {
+        get_alliance_info_for_server(pool, server.id).await
+    } else {
+        Err(anyhow::anyhow!("No active server found"))
+    }
+}
+
+pub async fn get_alliance_info_for_server(pool: &PgPool, server_id: i32) -> Result<AllianceInfo> {
+    let available_dates = get_available_dates_for_server(pool, server_id).await?;
+    
+    if available_dates.is_empty() {
+        return Ok(AllianceInfo {
+            top_alliances: Vec::new(),
+            total_alliances: 0,
+        });
+    }
+    
+    let latest_date = available_dates[0].0;
+    let latest_table = get_table_name_for_server_and_date(server_id, latest_date);
+    
+    // Check if table exists
+    let table_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1)"
+    )
+    .bind(&latest_table)
+    .fetch_one(pool)
+    .await?;
+    
+    if !table_exists {
+        return Ok(AllianceInfo {
+            top_alliances: Vec::new(),
+            total_alliances: 0,
+        });
+    }
+    
+    // Get the active server for alliance links
+    let active_server = get_active_server(pool).await?;
+    let server_base_url = if let Some(server) = &active_server {
+        let base_url = server.url.trim_end_matches("/map.sql").trim_end_matches("map.sql");
+        Some(base_url.trim_end_matches('/').to_string())
+    } else {
+        None
+    };
+    
+    // Get current alliance statistics
+    let alliance_query = format!(
+        "SELECT alliance, aid, COUNT(DISTINCT uid) as member_count, COUNT(*) as village_count, SUM(population) as total_population
+         FROM {} 
+         WHERE server_id = $1 AND alliance IS NOT NULL AND alliance != '' AND alliance != 'Natars'
+         GROUP BY alliance, aid 
+         ORDER BY total_population DESC 
+         LIMIT 20",
+        latest_table
+    );
+    
+    let alliance_rows = sqlx::query(&alliance_query)
+        .bind(server_id)
+        .fetch_all(pool)
+        .await?;
+    
+    let mut alliance_stats = Vec::new();
+    
+    // Get previous day's data for growth calculation if available
+    let has_previous_data = available_dates.len() > 1;
+    let previous_table = if has_previous_data {
+        Some(get_table_name_for_server_and_date(server_id, available_dates[1].0))
+    } else {
+        None
+    };
+    
+    for row in alliance_rows {
+        let alliance_name: String = row.get("alliance");
+        let alliance_id: Option<i32> = row.get("aid");
+        let member_count: i64 = row.get("member_count");
+        let village_count: i64 = row.get("village_count");
+        let current_population: i64 = row.get::<Option<i64>, _>("total_population").unwrap_or(0);
+        
+        // Calculate growth if previous data is available
+        let (population_growth, growth_percentage) = if let Some(ref prev_table) = previous_table {
+            // Check if previous table exists
+            let prev_table_exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1)"
+            )
+            .bind(prev_table)
+            .fetch_one(pool)
+            .await?;
+            
+            if prev_table_exists {
+                let prev_query = format!(
+                    "SELECT SUM(population) as prev_population
+                     FROM {} 
+                     WHERE server_id = $1 AND alliance = $2",
+                    prev_table
+                );
+                
+                let prev_population: i64 = sqlx::query_scalar(&prev_query)
+                    .bind(server_id)
+                    .bind(&alliance_name)
+                    .fetch_optional(pool)
+                    .await?
+                    .unwrap_or(0);
+                
+                let growth = current_population - prev_population;
+                let growth_pct = if prev_population > 0 {
+                    (growth as f64 / prev_population as f64) * 100.0
+                } else {
+                    0.0
+                };
+                
+                (growth, growth_pct)
+            } else {
+                (0, 0.0)
+            }
+        } else {
+            (0, 0.0)
+        };
+        
+        let alliance_link = if let (Some(base_url), Some(aid)) = (&server_base_url, alliance_id) {
+            Some(format!("{}/alliance/{}", base_url, aid))
+        } else {
+            None
+        };
+        
+        let avg_pop_per_village = if village_count > 0 {
+            (current_population / village_count) as i32
+        } else {
+            0
+        };
+        
+        alliance_stats.push(AllianceStats {
+            alliance_name,
+            alliance_id,
+            member_count: member_count as i32,
+            village_count: village_count as i32,
+            total_population: current_population,
+            average_population_per_village: avg_pop_per_village,
+            population_growth,
+            growth_percentage,
+            alliance_link,
+        });
+    }
+    
+    // Get total number of alliances
+    let total_query = format!(
+        "SELECT COUNT(DISTINCT alliance) as total_alliances
+         FROM {} 
+         WHERE server_id = $1 AND alliance IS NOT NULL AND alliance != '' AND alliance != 'Natars'",
+        latest_table
+    );
+    
+    let total_alliances: i64 = sqlx::query_scalar(&total_query)
+        .bind(server_id)
+        .fetch_one(pool)
+        .await?;
+    
+    Ok(AllianceInfo {
+        top_alliances: alliance_stats,
+        total_alliances: total_alliances as i32,
+    })
 }
