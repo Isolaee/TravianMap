@@ -161,73 +161,9 @@ pub async fn cleanup_old_tables(pool: &PgPool) -> Result<()> {
 }
 
 pub async fn insert_sample_data(pool: &PgPool) -> Result<()> {
-    // First, create a sample server if none exists
-    let servers = get_all_servers(pool).await?;
-    let server_id = if servers.is_empty() {
-        let server = add_server(pool, "Sample Server", "https://sample.travian.com").await?;
-        set_active_server(pool, server.id).await?;
-        server.id
-    } else {
-        servers[0].id
-    };
-
-    // Check if we already have data for this server
-    let available_dates = get_available_dates_for_server(pool, server_id).await?;
-    if !available_dates.is_empty() {
-        return Ok(()); // Data already exists
-    }
-
-    // Create table for today
-    let today = chrono::Utc::now().date_naive();
-    let table_name = create_table_for_server_and_date(pool, server_id, today).await?;
-
-    // Insert sample villages with tribe information
-    let villages = vec![
-        ("Capitol", 0, 0, 1000, 1, "Caesar", "Romans United"), // Romans
-        ("Fortress Germania", 5, 10, 850, 2, "Arminius", "Teutonic Knights"), // Teutons
-        ("Village Gaulois", 15, 3, 750, 3, "Vercingetorix", "Gaul Alliance"), // Gauls
-        ("Roman Outpost", -8, -12, 900, 1, "Marcus", "Romans United"), // Romans
-        ("Teutonic Fort", -20, 5, 800, 2, "Wolfgang", "Teutonic Knights"), // Teutons
-        ("Celtic Hill", 25, 25, 700, 3, "Asterix", "Gaul Alliance"), // Gauls
-        ("Imperial City", -15, 8, 1200, 1, "Augustus", "Roman Empire"), // Romans
-        ("Barbarian Camp", 12, -5, 650, 2, "Thorsten", "Wild Boars"), // Teutons
-        ("Druid Grove", 30, -20, 600, 3, "Panoramix", "Forest Guardians"), // Gauls
-        ("Oasis Settlement", -25, -15, 200, 4, "Nature", ""), // Nature
-        ("Natars Village", 8, 18, 1500, 5, "Natars", ""), // Natars
-        ("Egyptian Pyramid", -5, -8, 950, 6, "Cleopatra", "Desert Sands"), // Egyptians
-        ("Hun Encampment", 40, 30, 800, 7, "Attila", "Horse Lords"), // Huns
-        ("Roman Villa", 45, -25, 750, 1, "Cicero", "Roman Senate"), // Romans
-        ("Germanic Village", -30, 20, 700, 2, "Hermann", "Forest Tribes"), // Teutons
-        ("Gaulish Trade Post", 35, 15, 650, 3, "Obelix", "Menhir Traders"), // Gauls
-    ];
-
-    for (i, (name, x, y, population, tribe_id, player, alliance)) in villages.iter().enumerate() {
-        let query = format!(
-            r#"
-            INSERT INTO {} (server_id, worldid, x, y, tid, vid, village, uid, player, aid, alliance, population)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-            "#,
-            table_name
-        );
-        
-        sqlx::query(&query)
-            .bind(server_id)
-            .bind(Some(1000 + i as i32)) // Sequential world ID
-            .bind(*x)
-            .bind(*y)
-            .bind(Some(*tribe_id))
-            .bind(Some(5000 + i as i32)) // Sequential village ID
-            .bind(name)
-            .bind(Some(100 + i as i32)) // Sequential user ID
-            .bind(if player.is_empty() { None } else { Some(player.to_string()) })
-            .bind(Some(1 + (i as i32 % 10))) // Alliance ID based on index
-            .bind(if alliance.is_empty() { None } else { Some(alliance.to_string()) })
-            .bind(*population)
-            .execute(pool)
-            .await?;
-    }
-
-    println!("Inserted {} sample villages into database for server {}", villages.len(), server_id);
+    // Sample data insertion is now optional and disabled by default
+    // The database starts empty and ready for real Travian server data
+    println!("Sample data insertion skipped - database ready for real data");
     Ok(())
 }
 
